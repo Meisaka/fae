@@ -29,7 +29,7 @@ void LoadFileV(const string path, string &outdata) {
 	auto file = std::fstream(path, std::ios_base::in | std::ios_base::binary | std::ios_base::ate);
 	size_t where = file.tellg();
 	file.seekg(std::ios_base::beg);
-	outdata.reserve(where);
+	outdata.resize(where);
 	file.read(outdata.data(), where);
 }
 
@@ -360,7 +360,7 @@ const ParserKeyword keyword_table[] = {
 	{"./%"sv ,token_t::Ident},
 };
 struct Precedence {
-	int prec;
+	uint8_t prec;
 	token_t token;
 };
 Precedence p_table[] = {
@@ -413,10 +413,11 @@ Precedence p_table[] = {
 	{9, token_t::O_Not},
 	{9, token_t::O_Length},
 
-	{10, token_t::O_Dot},
+	{10, token_t::O_RefExpr},
+	{11, token_t::O_Dot},
 };
 constexpr auto p_table_span = std::span{p_table};
-static int get_precedence(token_t token) {
+static uint8_t get_precedence(token_t token) {
 	auto found = std::ranges::find(p_table_span, token, &Precedence::token);
 	if(found != p_table_span.end()) {
 		return found->prec;
@@ -464,16 +465,15 @@ struct ASTNode {
 	LexTokenRange block;
 	token_t ast_token;
 	Expr asc;
-	union {
-		int precedence;
-		int expr_target;
-	};
+	uint8_t meta_value;
+	bool newline;
+	bool whitespace;
 	//std::shared_ptr<string> source;
 	ASTNode() = delete;
 	ASTNode(token_t token, Expr a, LexTokenRange lex_range)
-		: ast_token{token}, asc{a}, block{lex_range}, precedence{get_precedence(token)} {}
-	ASTNode(token_t token, Expr a, int e, LexTokenRange lex_range)
-		: ast_token{token}, asc{a}, block{lex_range}, expr_target{e} {}
+		: ast_token{token}, asc{a}, block{lex_range}, newline{false}, whitespace{false}, meta_value{get_precedence(token)} {}
+	ASTNode(token_t token, Expr a, uint8_t e, LexTokenRange lex_range)
+		: ast_token{token}, asc{a}, block{lex_range}, newline{false}, whitespace{false}, meta_value{e} {}
 	expr_list_t expressions;
 };
 struct ExprStackItem {
@@ -490,10 +490,12 @@ static void show_node(std::ostream &os, const ASTNode &node, int depth) {
 	os << "("
 	<< token_name(node.ast_token)
 	<< " " << expr_type_name(node.asc);
+	if(node.newline) os << " NL";
+	else if(node.whitespace) os << " SP";
 	if(node.asc == Expr::RawOper || node.asc == Expr::OperExpr || node.asc == Expr::OperOpen)
-		os << " " << node.precedence;
-	if(node.asc == Expr::KeywExpr)
-		os << " " << node.expr_target << "," << node.expressions.size();
+		os << " " << static_cast<uint32_t>(node.meta_value);
+	if(node.asc == Expr::KeywExpr || node.asc == Expr::BlockExpr)
+		os << " " << static_cast<uint32_t>(node.meta_value) << "," << node.expressions.size();
 	if(node.asc == Expr::Start) {
 		os << '\"' << std::string_view(node.block.tk_begin, node.block.tk_end) << '\"';
 	}
@@ -527,12 +529,12 @@ std::ostream &operator<<(std::ostream &os, const ASTNode &node) {
 #define REMOV_EXhead expr_list.pop_back()
 #define REMOVE_EXPR(ex) ex
 #define REMOVE1(ex) REMOVE_EXPR(REMOV_EX##ex)
-#define CONV_N(n, t, num) n->asc = Expr::t; n->expr_target = num;
+#define CONV_N(n, t, num) n->asc = Expr::t; n->meta_value = num
 #define EXTEND_TO(t, sl, sr) t->block.tk_begin = sl->block.tk_begin; \
 	t->block.tk_end = sr->block.tk_end;
-#define AT_EXPR_TARGET(id) (id->expressions.size() >= id->expr_target)
-#define IS_TOKEN(n, t) (n->ast_token == token_t::t)
-#define IS_CLASS(n, c) (n->asc == Expr::c)
+#define AT_EXPR_TARGET(id) (id->expressions.size() >= id->meta_value)
+#define IS_TOKEN(n, t) ((n)->ast_token == token_t::t)
+#define IS_CLASS(n, c) ((n)->asc == Expr::c)
 #define IS2C(c1, c2) ((prev->asc == Expr::c1) && (head->asc == Expr::c2))
 #define IS3C(c1, c2, c3) (third && (third->asc == Expr::c1) && (prev->asc == Expr::c2) && (head->asc == Expr::c3))
 #define MAKE_NODE_FROM1(n, t, cl, s) n = std::make_unique<ASTNode>( \
@@ -568,19 +570,22 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 	auto push_token = [&](LexTokenRange &lex_range) {
 		auto token_string = std::string_view(lex_range.tk_begin, lex_range.tk_end);
 		bool show = true;
-		
 		auto collapse_expr = [&](bool terminating) {
 			auto &expr_list = current_block->expr_list;
 			node_ptr expr_hold;
 			// try to collapse the expression list
 			while(true) {
-				if(expr_list.size() == 1 && expr_list.back()->ast_token == token_t::Newline) {
+				if(expr_list.size() == 1 && (
+					expr_list.back()->ast_token == token_t::Newline
+					|| expr_list.back()->ast_token == token_t::White
+				)) {
 					expr_list.pop_back();
 				}
 				if(expr_list.size() < 2) break;
-				dbg << "||";
 				auto &head = expr_list.back();
 				auto &prev = *(expr_list.end() - 2);
+				//dbg << "|";
+				dbg << "<|" << prev << "," << head << "|>";
 				node_ptr empty;
 				auto &third = expr_list.size() >= 3 ? *(expr_list.end() - 3) : empty;
 				auto &fourth = expr_list.size() >= 4 ? *(expr_list.end() - 4) : empty;
@@ -595,111 +600,116 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					REMOVE1(prev);
 					dbg << "\n<op_to_expr>";
 				} else if(terminating &&
-					(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut))
-					&& IS_TOKEN(head, Ident)
-					&& !AT_EXPR_TARGET(prev)
-				) {
-					PUSH_INTO(prev, head);
-					REMOVE1(head);
-					continue;
-				} else if(
 					IS_CLASS(prev, FuncExpr) && !AT_EXPR_TARGET(prev)
 					&& (
 						IS_CLASS(head, BlockExpr)
 						|| IS_CLASS(head, OperExpr)
 						|| IS_CLASS(head, Start))
 					) {
-					if(terminating) {
-						PUSH_INTO(prev, head);
-						REMOVE1(head);
-					} else {
-						dbg << "\n<func expr>";
-					}
-				} else if(IS3C(FuncExpr, BlockExpr, Start)) {
-					PUSH_INTO(third, prev);
-					REMOVE1(prev);
-				} else if(third && IS_CLASS(head, FuncDecl) && (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))) {
+					EXTEND_TO(prev, prev, head);
+					prev->newline = head->newline;
+					PUSH_INTO(prev, head);
+					REMOVE1(head);
+					continue;
+				} else if(third
+					&& IS_TOKEN(third, Ident)
+					&& IS_CLASS(head, FuncDecl)
+					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+				) {
 					// check third for another ident or let
-					if(IS_TOKEN(third, Ident)) {
-						// TODO operator names
-						// TODO also need to check for newline
-						// named function with one arg or comma arg list
-						node_ptr comma_list;
-						if(IS_CLASS(prev, CommaList)) {
-							dbg << "\n<name func comma args>";
-							comma_list = std::move(prev);
-						} else {
-							dbg << "\n<name func one arg>";
-							MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
-							PUSH_INTO(comma_list, prev);
-						}
-						auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
-						PUSH_INTO(let_expr, third);
-						third = std::move(let_expr);
-						CONV_N(head, FuncExpr, 2)
-						PUSH_INTO(head, comma_list);
-						REMOVE1(prev);
-					} else if(IS_TOKEN(third, K_Let)) {
-						// TODO check let is well formed
-						// let function with one argument or comma arg list
-						node_ptr comma_list;
-						if(IS_CLASS(prev, CommaList)) {
-							dbg << "\n<let func comma args>";
-							comma_list = std::move(prev);
-						} else {
-							dbg << "\n<let func one arg>";
-							MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
-							PUSH_INTO(comma_list, prev);
-						}
-						CONV_N(head, FuncExpr, 2)
-						PUSH_INTO(head, comma_list);
-						REMOVE1(prev);
+					// TODO operator names
+					// TODO also need to check for newline
+					// named function with one arg or comma arg list
+					node_ptr comma_list;
+					if(IS_CLASS(prev, CommaList)) {
+						dbg << "\n<name func comma args>";
+						comma_list = std::move(prev);
 					} else {
-						auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev);
-						PUSH_INTO(let_expr, prev);
-						prev = std::move(let_expr);
-						auto MAKE_NODE_FROM1(comma_list, Func, CommaList, head);
-						CONV_N(head, FuncExpr, 2)
-						PUSH_INTO(head, comma_list);
-						// named function with no args or anon with comma arg list
-						dbg << "\n<func no args?>";
+						dbg << "\n<name func one arg>";
+						MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
+						PUSH_INTO(comma_list, prev);
 					}
+					auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
+					auto MAKE_NODE_FROM1(let_assign, O_Assign, OperOpen, third);
+					PUSH_INTO(let_assign, third);
+					third = std::move(let_expr);
+					prev = std::move(let_assign);
+					CONV_N(head, FuncExpr, 2);
+					PUSH_INTO(head, comma_list);
+				} else if(third
+					&& (IS_TOKEN(third, K_Let) && AT_EXPR_TARGET(third) && IS_TOKEN(third->expressions.back(), Ident))
+					&& IS_CLASS(head, FuncDecl)
+					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+				) {
+					// TODO check let is well formed
+					// let function with one argument or comma arg list
+					node_ptr comma_list;
+					if(IS_CLASS(prev, CommaList)) {
+						dbg << "\n<let func comma args>";
+						comma_list = std::move(prev);
+					} else {
+						dbg << "\n<let func one arg>";
+						MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
+						PUSH_INTO(comma_list, prev);
+					}
+					auto MAKE_NODE_FROM1(let_assign, O_Assign, OperOpen, third);
+					PUSH_INTO(let_assign, third->expressions.back());
+					third->expressions.pop_back();
+					prev = std::move(let_assign);
+					CONV_N(head, FuncExpr, 2);
+					PUSH_INTO(head, comma_list);
+				} else if(
+					IS_CLASS(head, FuncDecl)
+					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+				) {
+					auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev);
+					auto MAKE_NODE_FROM1(let_assign, O_Assign, OperOpen, prev);
+					PUSH_INTO(let_assign, prev);
+					prev = std::move(let_expr);
+					auto MAKE_NODE_FROM1(comma_list, Func, CommaList, head);
+					CONV_N(head, FuncExpr, 2);
+					PUSH_INTO(head, comma_list);
+					expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
+					// named function with no args or anon with comma arg list
+					dbg << "\n<func no args?>";
 				} else if(IS_CLASS(head, FuncDecl) && (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))) {
 					dbg << "\n<func no third>";
-					CONV_N(head, FuncExpr, 2)
+					CONV_N(head, FuncExpr, 2);
 					PUSH_INTO(head, prev);
 					REMOVE1(prev);
 				} else if(IS2C(BlockExpr, FuncDecl)) {
 					// anon function with blocked arg list
 					// or named function with blocked arg list?
 					dbg << "\n<func block>";
-					CONV_N(head, FuncExpr, 2)
+					CONV_N(head, FuncExpr, 2);
 					PUSH_INTO(head, prev);
 					REMOVE1(prev);
-				} else if(
+				} else if(terminating &&
 					IS_CLASS(prev, KeywExpr)
 					&& (
 						IS_CLASS(head, Start)
 						|| IS_CLASS(head, OperExpr)
 						|| IS_CLASS(head, BlockExpr))
 				) {
-					if((terminating) && !AT_EXPR_TARGET(prev)) {
+					if(!AT_EXPR_TARGET(prev)) {
+						prev->newline = head->newline;
 						PUSH_INTO(prev, head);
 						REMOVE1(head);
 						continue;
+					} else {
+						dbg << "\n<unhandled KeywExpr *Expr>";
 					}
 				} else if((
 					IS_TOKEN(prev, Ident)
 					|| IS_TOKEN(prev, O_RefExpr)
 					|| IS_TOKEN(prev, O_Dot)
-					) && (
+					) && !prev->whitespace && !prev->newline && (
 						IS_TOKEN(head, Array)
 						|| IS_TOKEN(head, Block)
 						|| IS_TOKEN(head, Object)
 						)
 				) {
 					auto MAKE_NODE_FROM2(block_expr, O_RefExpr, OperExpr, prev, head);
-					block_expr->precedence = 20;
 					PUSH_INTO(block_expr, prev);
 					PUSH_INTO(block_expr, head);
 					REMOVE1(head);
@@ -713,15 +723,21 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					prev->asc = Expr::Start;
 					dbg << "<DotArray>";
 					continue;
-				} else if(IS2C(OperOpen, Start)) {
+				} else if(terminating && IS_CLASS(prev, OperOpen) && (
+					IS_CLASS(head, Start)
+					|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
+				)) {
 					// before: (oper OperOpen (value Start)) (value Start)
 					//  after: (oper OperExpr (value Start) (value Start))
+					dbg << "<OpPut>";
 					prev->asc = Expr::OperExpr;
+					prev->newline = head->newline;
 					PUSH_INTO(prev, head);
 					REMOVE1(head);
+					continue;
 				} else if(IS2C(OperExpr, RawOper)) {
 					// before: (oper1 OperExpr (value1 Start) (value2 Start)) (oper2 Raw)
-					if(head->precedence <= prev->precedence) {
+					if(head->meta_value <= prev->meta_value) {
 						// new is same precedence: (1+2)+ => ((1+2)+_)
 						// new is lower precedence: (1*2)+ => ((1*2)+_)
 						//  after: (oper2 OperOpen
@@ -804,13 +820,19 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 							continue;
 						}
 					}
-					if(!terminating) {
-						dbg << "\n<collapse_expr prev>";
+					if(!terminating && !expr_hold) {
+						dbg << "\n<collapse_expr before " << head << ">";
 						terminating = true;
 						expr_hold = std::move(expr_list.back());
 						REMOVE1(head);
 						continue;
 					}
+				} else if(!terminating && IS_TOKEN(head, Semi) && !expr_hold) {
+					dbg << "\n<collapse_expr semi>";
+					terminating = true;
+					expr_hold = std::move(expr_list.back());
+					REMOVE1(head);
+					continue;
 				} else if((
 						IS_CLASS(head, Start)
 						//|| IS_CLASS(head, OperExpr)
@@ -832,31 +854,40 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 						if(IS_TOKEN(prev, O_Sub))
 							prev->ast_token = token_t::O_Minus;
 						prev->asc = Expr::Prefix;
-						prev->precedence = get_precedence(prev->ast_token);
+						prev->meta_value = get_precedence(prev->ast_token);
 						continue;
 					}
-				} else if(IS_CLASS(head, RawOper) && (
+				} else if((
 					IS_CLASS(prev, OperOpen)
 					|| IS_CLASS(prev, Delimiter)
+					|| IS_CLASS(prev, KeywExpr)
 					|| IS_CLASS(prev, Prefix)
-					)) {
+					)
+					&& IS_CLASS(head, RawOper)
+				) {
 					if(IS_TOKEN(head, O_Sub) || IS_TOKEN(head, O_Dot)) {
 						if(IS_TOKEN(head, O_Sub))
 							head->ast_token = token_t::O_Minus;
 						head->asc = Expr::Prefix;
-						head->precedence = get_precedence(head->ast_token);
+						head->meta_value = get_precedence(head->ast_token);
 					}
-				} else if(IS2C(OperOpen, OperExpr)) {
+				} else if(terminating && IS2C(OperOpen, OperExpr)) {
 					// collapse the tree one level
 					dbg << "<OPCol>";
-					if(head->precedence <= prev->precedence) {
+
+					if(head->meta_value <= prev->meta_value) {
 						// pop the prev item and put into the head item LHS
 						//dbg << "<LEP\nL:" << prev << "\nR:" << head << "\n>";
 						// ex1front push_into ex2
 						// ex2 insert_into ex1front
 						prev->asc = Expr::OperExpr;
-						PUSH_INTO(prev, head->expressions.front());
-						prev.swap(head->expressions.front());
+						auto decend_item = &head;
+						while(IS_CLASS(*decend_item, OperExpr) && (*decend_item)->meta_value <= prev->meta_value) {
+							dbg << "<LED>";
+							decend_item = &(*decend_item)->expressions.front();
+						}
+						PUSH_INTO(prev, *decend_item);
+						prev.swap(*decend_item);
 						REMOVE1(prev);
 						continue; // re-eval the top of stack
 					} else {
@@ -870,7 +901,10 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					dbg << "<End>";
 					// no op
 				} else if(IS2C(CommaList, Delimiter)) {
-				} else if(IS2C(Start, Delimiter) && IS_TOKEN(head, Comma)) {
+				} else if((
+					IS_CLASS(prev, Start)
+					|| IS_CLASS(prev, OperExpr)
+					) && IS_TOKEN(head, Comma)) {
 					if(third
 						&& IS_CLASS(third, Delimiter)
 						&& IS_TOKEN(third, Comma)
@@ -885,37 +919,69 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 						PUSH_INTO(comma_list, prev);
 						prev.swap(comma_list); // comma_list -> prev
 					}
-				} else if(terminating && IS_TOKEN(head, Newline)) {
+				} else if(terminating &&
+					(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut))
+					&& (IS_TOKEN(head, Ident) || IS_CLASS(head, CommaList))
+					&& !AT_EXPR_TARGET(prev)
+				) {
+					PUSH_INTO(prev, head);
 					REMOVE1(head);
 					continue;
-				} else if(IS_TOKEN(prev, Newline) && IS_TOKEN(head, Newline)) {
+				} else if(IS_TOKEN(head, Newline)) {
+					prev->newline = true;
+					REMOVE1(head);
+					if(terminating || IS_TOKEN(prev, Newline) ) continue;
+				} else if( IS_TOKEN(prev, White) && IS_TOKEN(head, Newline) ) {
+					REMOVE1(prev);
+					continue;
+				} else if( IS_TOKEN(prev, Newline) && IS_TOKEN(head, White) ) {
 					REMOVE1(head);
 					continue;
+				} else if(IS_TOKEN(head, White)) {
+					prev->whitespace = true;
+					REMOVE1(head);
+					if(terminating || IS_TOKEN(prev, White)) continue;
+				} else if(terminating && IS_TOKEN(prev, Comma) && 
+					(IS_CLASS(head, Start)
+					|| IS_CLASS(head, OperExpr)
+					|| IS_CLASS(head, BlockExpr)
+					)
+				) {
+					if(third && IS_CLASS(third, CommaList)) {
+						EXTEND_TO(third, third, head);
+						third->newline = head->newline;
+						PUSH_INTO(third, head);
+						expr_list.erase(expr_list.cend() - 2, expr_list.cend());
+						continue;
+					} else if(third && (
+						IS_CLASS(third, Start)
+						|| IS_CLASS(third, OperExpr)
+						|| IS_CLASS(third, BlockExpr)
+						)) {
+						prev->asc = Expr::CommaList;
+						EXTEND_TO(prev, third, head);
+						prev->newline = head->newline;
+						PUSH_INTO(prev, third);
+						PUSH_INTO(prev, head);
+						REMOVE1(head); // "head"
+						REMOVE1(prev); // "third" after head removed
+						continue;
+					} else {
+						dbg << "<ERROR Comma!?>";
+					}
+				} else if(IS2C(OperOpen, Start) || IS2C(OperOpen, OperExpr)) {
+					dbg << "<NOPS>";
 				} else if(IS2C(Delimiter, Start)) {
-					if(terminating && IS_TOKEN(prev, Comma)) {
-						if(third && IS_CLASS(third, CommaList)) {
-							EXTEND_TO(third, third, head);
-							PUSH_INTO(third, head);
-							expr_list.erase(expr_list.cend() - 2, expr_list.cend());
-						} else if(third && IS_CLASS(third, Start)) {
-							prev->asc = Expr::CommaList;
-							EXTEND_TO(prev, third, head);
-							PUSH_INTO(prev, third);
-							PUSH_INTO(prev, head);
-							REMOVE1(head); // "head"
-							REMOVE1(prev); // "third" after head removed
-						} else {
-							dbg << "<ERROR Comma!?>";
-						}
-					} else if(terminating) {
+					if(terminating) {
 						dbg << "<TODO Delimiter>";
 					} else dbg << "<NOP>";
 				} else {
-					dbg << "\n<<collapse_expr unhandled " << prev << ":" << head << ">>";
+					dbg << "\n<<collapse_expr " << terminating << " unhandled " << prev << ":" << head << ">>";
 				}
 				break;
 			}
 			if(expr_hold) {
+				dbg << "\n<END collapse_expr before " << expr_hold << ">";
 				expr_list.emplace_back(std::move(expr_hold));
 			}
 		};
@@ -981,12 +1047,13 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			}
 			break;
 		}
+		case token_t::White:
 		case token_t::Newline: {
-			start_expr(std::make_unique<ASTNode>(token_t::Newline, Expr::Delimiter, lex_range));
+			start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::Delimiter, lex_range));
 			break;
 		}
 		case token_t::Comma: {
-			terminal_expr();
+			//terminal_expr();
 			start_expr(std::make_unique<ASTNode>(token_t::Comma, Expr::Delimiter, lex_range));
 			break;
 		}
