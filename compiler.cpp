@@ -5,21 +5,13 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include "script.hpp"
 using namespace std::string_view_literals;
 
 namespace Fae {
 
 using string = std::string;
 
-class ScriptContext {
-public:
-
-	ScriptContext();
-	virtual ~ScriptContext();
-
-	virtual void FunctionCall(std::string);
-	virtual void LoadScriptFile(string f, string i);
-};
 ScriptContext::ScriptContext() {}
 ScriptContext::~ScriptContext() {}
 
