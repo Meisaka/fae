@@ -574,10 +574,11 @@ std::ostream &operator<<(std::ostream &os, const Variable &v) {
 }
 
 #define DEF_OPCODES(f) \
-	f(LoadConst) f(LoadBool) f(LoadVariable) f(LoadString) \
-	f(LoadClosure) f(AssignLocal) f(AssignNamed) f(LoadUnit) \
-	f(PushRegister) f(NamedLookup) f(NamedArgLookup) \
-	f(CallExpression) f(EnterScope) f(ExitScope) f(Jump) f(JumpIf) \
+	f(LoadConst) f(LoadBool) f(LoadVariable) f(LoadClosed) f(LoadString) \
+	f(LoadClosure) f(AssignLocal) f(AssignClosed) f(AssignNamed) f(LoadUnit) \
+	f(PushRegister) f(PopRegister) f(LoadStack) f(StoreStack) f(PopStack) \
+	f(NamedLookup) f(NamedArgLookup) \
+	f(CallExpression) f(ExitScope) f(Jump) f(JumpIf) \
 	f(AddInteger) f(SubInteger) f(MulInteger) f(DivInteger) f(ModInteger) f(PowInteger) \
 	f(Negate) f(Not) \
 	f(AndInteger) f(OrInteger) f(XorInteger) \
@@ -603,7 +604,16 @@ std::ostream &operator<<(std::ostream &os, const Opcode &v) {
 
 struct Instruction {
 	Opcode opcode;
-	uint64_t param;
+	union {
+		uint64_t param;
+		struct {
+			uint32_t param_a;
+			uint32_t param_b;
+		};
+	};
+	Instruction(Opcode o) : opcode{o}, param{0} {}
+	Instruction(Opcode o, uint64_t p) : opcode{o}, param{p} {}
+	Instruction(Opcode o, uint32_t a, uint32_t b) : opcode{o}, param_a{a}, param_b{b} {}
 };
 
 std::ostream &operator<<(std::ostream &os, const Instruction &v) {
@@ -611,32 +621,34 @@ std::ostream &operator<<(std::ostream &os, const Instruction &v) {
 	return os;
 }
 
-struct BlockContext;
+struct FrameContext;
 
 struct VariableDeclaration {
 	size_t name_index;
-	Variable value;
+	size_t stack_pos;
 };
 std::ostream &operator<<(std::ostream &os, const VariableDeclaration &v) {
-	os << "Decl{" << v.name_index << "," << v.value << "}";
+	os << "Decl{" << v.name_index << "}";
 	return os;
 }
 
-struct BlockContext {
-	std::shared_ptr<BlockContext> up;
-	size_t scope_index;
-	std::vector<VariableDeclaration> locals;
+struct FrameContext {
+	std::shared_ptr<FrameContext> up;
+	size_t frame_index;
+	std::vector<VariableDeclaration> var_declarations;
+	size_t current_depth;
+	std::vector<size_t> scope_depths;
 	std::vector<Instruction> instructions;
-	BlockContext(size_t scope_id) : scope_index{scope_id} {}
-	BlockContext(size_t scope_id, std::shared_ptr<BlockContext> &up_ptr)
-		: scope_index{scope_id}, up{up_ptr} {}
+	FrameContext(size_t scope_id) : frame_index{scope_id}, current_depth{0} {}
+	FrameContext(size_t scope_id, std::shared_ptr<FrameContext> &up_ptr)
+		: frame_index{scope_id}, up{up_ptr}, current_depth{0} {}
 };
 struct ModuleContext {
 	std::string file_source;
 	std::vector<size_t> line_positions;
 	std::vector<std::string_view> string_table;
-	std::shared_ptr<BlockContext> root_context;
-	std::vector<std::shared_ptr<BlockContext>> scopes;
+	std::shared_ptr<FrameContext> root_context;
+	std::vector<std::shared_ptr<FrameContext>> frames;
 
 	size_t find_or_put_string(std::string_view s) {
 		auto found = std::ranges::find(this->string_table, s);
@@ -686,7 +698,7 @@ bool convert_number_bin(std::string_view raw_number, uint64_t &output) {
 	return true;
 }
 
-bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_ptr<BlockContext> &ctx, const node_ptr &expr) {
+bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_ptr<FrameContext> &ctx, const node_ptr &expr) {
 	auto show_position = [&](const LexTokenRange &block) {
 		auto file_start = module_ctx->file_source.cbegin();
 		size_t offset = block.tk_begin - file_start;
@@ -709,14 +721,14 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 	dbg << "Expr:" << expr->ast_token << " ";
 	switch(expr->asc) {
 	case Expr::BlockExpr: {
-		module_ctx->scopes.emplace_back(std::make_shared<BlockContext>(module_ctx->scopes.size(), ctx));
-		auto block_context = module_ctx->scopes.back();
-		ctx->instructions.emplace_back(Instruction{Opcode::EnterScope, block_context->scope_index});
+		size_t current_depth = ctx->current_depth;
+		ctx->scope_depths.push_back(current_depth);
 		for(auto &walk_node : expr->expressions) {
-			if(!walk_expression(dbg, module_ctx, block_context, walk_node))
+			if(!walk_expression(dbg, module_ctx, ctx, walk_node))
 				return false;
 		}
-		block_context->instructions.emplace_back(Instruction{Opcode::ExitScope, 0});
+		if(current_depth != ctx->current_depth)
+			ctx->instructions.emplace_back(Instruction{Opcode::ExitScope, current_depth});
 		//for(auto &ins : block_context->instructions) dbg << ins << '\n';
 		dbg << "block end\n";
 		break;
@@ -740,17 +752,17 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				}
 				size_t string_index = module_ctx->find_or_put_string(
 					item->expressions.front()->block.as_string() );
-				size_t var_index = ctx->locals.size();
-				ctx->locals.emplace_back(VariableDeclaration{string_index, Variable{}});
-				dbg << "let decl " << ctx->locals.back() << " = \n";
 				if(!walk_expression(dbg, module_ctx, ctx, item->expressions[1])) return false;
-				// TODO assign the value
-				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, var_index});
+				size_t var_index = ctx->current_depth++;
+				size_t decl_index = ctx->var_declarations.size();
+				ctx->var_declarations.emplace_back(VariableDeclaration{string_index, var_index});
+				dbg << "let decl " << ctx->var_declarations.back() << " " << module_ctx->string_table[string_index] << " = \n";
+				// assign the value
+				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, decl_index});
 				return true;
 			} else if(IS_TOKEN(item, Ident)) {
 				size_t string_index = module_ctx->find_or_put_string(item->block.as_string());
-				ctx->locals.emplace_back(VariableDeclaration{string_index, Variable{}});
-				dbg << "TODO let decl " << ctx->locals.back() << "\n";
+				dbg << "TODO let decl " << "\n";
 				return true;
 			} else {
 				show_syn_error("Let expression", item);
@@ -817,21 +829,20 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				else show_syn_error("While expression", expr);
 				return false;
 			}
-			module_ctx->scopes.emplace_back(std::make_shared<BlockContext>(module_ctx->scopes.size(), ctx));
-			auto until_scope = module_ctx->scopes.back();
-			ctx->instructions.emplace_back(Instruction{Opcode::EnterScope, until_scope->scope_index});
+			size_t current_depth = ctx->var_declarations.size();
 			auto walk_expr = expr->expressions.cbegin();
-			if(!walk_expression(dbg, module_ctx, until_scope, *walk_expr)) return false;
+			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
 			walk_expr++;
 			if(IS_TOKEN(expr, K_Until))
-				until_scope->instructions.emplace_back(Instruction{Opcode::Not, 0});
-			until_scope->instructions.emplace_back(Instruction{Opcode::JumpIf, 0});
-			size_t jump_ins = until_scope->instructions.size() - 1;
-			if(!walk_expression(dbg, module_ctx, until_scope, *walk_expr)) return false;
-			until_scope->instructions.emplace_back(Instruction{Opcode::Jump, 0});
-			until_scope->instructions[jump_ins].param = until_scope->instructions.size();
-			until_scope->instructions.emplace_back(Instruction{Opcode::ExitScope, 0});
-			// for(auto &ins : until_scope->instructions) dbg << ins << '\n';
+				ctx->instructions.emplace_back(Instruction{Opcode::Not, 0});
+			ctx->instructions.emplace_back(Instruction{Opcode::JumpIf, 0});
+			size_t jump_ins = ctx->instructions.size() - 1;
+			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
+			ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
+			ctx->instructions[jump_ins].param = ctx->instructions.size();
+			if(current_depth != ctx->var_declarations.size())
+				ctx->instructions.emplace_back(Instruction{Opcode::ExitScope, current_depth});
+			// for(auto &ins : ctx->instructions) dbg << ins << '\n';
 			return true;
 		}
 		default:
@@ -855,13 +866,25 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			dbg << "\ncall with: ";
 			// arguments
 			auto &args = expr->expressions[1];
+			bool func_save = false;
 			if(IS_TOKEN(args, Block)) {
+				if(!args->expressions.empty()) {
+					ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+					func_save = true;
+				}
 				for(auto &arg : args->expressions) {
 					if(!walk_expression(dbg, module_ctx, ctx, arg)) return false;
 					ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
 				}
+				if(!args->expressions.empty())
+					ctx->instructions.emplace_back(Instruction{Opcode::LoadStack, args->expressions.size()});
+			} else {
+				dbg << "unhandled function call\n";
+				return false;
 			}
 			ctx->instructions.emplace_back(Instruction{Opcode::CallExpression, args->expressions.size()});
+			if(func_save)
+				ctx->instructions.emplace_back(Instruction{Opcode::PopStack, 0});
 			dbg << "\n";
 			return true;
 		}
@@ -1004,8 +1027,27 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			return true;
 		case token_t::Ident: {
 			size_t string_index = module_ctx->find_or_put_string(expr->block.as_string());
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadVariable, string_index});
-			dbg << "load variable [" << string_index  << "]" << expr->block.as_string() << "\n";
+			auto search_context = ctx.get();
+			uint32_t up_count = 0;
+			uint32_t decl_index = 0;
+			for(;;) {
+				if(search_context == nullptr) {
+					dbg << "variable not found: " << module_ctx->string_table[string_index] << "\n";
+					return false;
+				}
+				auto found = std::ranges::find(search_context->var_declarations, string_index, &VariableDeclaration::name_index);
+				if(found == search_context->var_declarations.cend()) {
+					search_context = search_context->up.get();
+					up_count++;
+					continue;
+				}
+				// found variable case
+				decl_index = static_cast<uint32_t>(found - search_context->var_declarations.cbegin());
+				break;
+			}
+			ctx->instructions.emplace_back(
+				Instruction{Opcode::LoadVariable, up_count, decl_index});
+			dbg << "load variable [" << string_index  << "]" << expr->block.as_string() << "->" << up_count << "," << decl_index << "\n";
 			return true;
 		}
 		case token_t::String: {
@@ -1033,10 +1075,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			show_syn_error("Function expression", expr);
 			return false;
 		}
-		dbg << "TODO verify function expression " << expr->block.as_string() << '\n';
-		module_ctx->scopes.emplace_back(std::make_shared<BlockContext>(module_ctx->scopes.size(), ctx));
-		auto function_context = module_ctx->scopes.back();
-		ctx->instructions.emplace_back(Instruction{Opcode::LoadClosure, function_context->scope_index});
+		dbg << "TODO function start " << expr->block.as_string() << '\n';
+		auto function_context = std::make_shared<FrameContext>(module_ctx->frames.size(), ctx);
+		module_ctx->frames.push_back(function_context);
+		ctx->instructions.emplace_back(Instruction{Opcode::LoadClosure, function_context->frame_index});
 		// expr->expressions[0] // TODO named argument list for the function declaration
 		// expr->expressions[1] // expression or block forming the function body
 		if(IS_TOKEN(expr->expressions[1], Block)) {
@@ -1048,6 +1090,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			if(!walk_expression(dbg, module_ctx, function_context, expr->expressions[1]))
 				return false;
 		}
+		dbg << "function end\n";
 		break;
 	}
 	default:
@@ -1812,8 +1855,8 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 	}
 	dbg << "\nComplete\n" << root_node << '\n';
 	dbg << "\nTree Walk\n";
-	root_module->root_context = std::make_shared<BlockContext>(BlockContext{0});
-	root_module->scopes.push_back(root_module->root_context);
+	root_module->root_context = std::make_shared<FrameContext>(FrameContext{0});
+	root_module->frames.push_back(root_module->root_context);
 	dbg << "\nLine table:\n";
 	for(auto itr = root_module->line_positions.cbegin(); itr != root_module->line_positions.cend(); itr++) {
 		dbg << "[" << itr - root_module->line_positions.cbegin() << "]" << *itr << '\n';
@@ -1824,24 +1867,25 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 		dbg << "[" << itr - root_module->string_table.cbegin() << "]" << *itr << '\n';
 	}
 	dbg << "\nScopes:\n";
-	for(auto scope = root_module->scopes.cbegin(); scope != root_module->scopes.cend(); scope++) {
-		dbg << "Scope: " << scope - root_module->scopes.cbegin() << "\n";
+	for(auto scope = root_module->frames.cbegin(); scope != root_module->frames.cend(); scope++) {
+		dbg << "Scope: " << scope - root_module->frames.cbegin() << "\n";
 		auto ins_begin = (*scope)->instructions.cbegin();
 		for(auto ins = ins_begin; ins != (*scope)->instructions.cend(); ins++)
 			dbg << "[" << ins - ins_begin << "] " << *ins << '\n';
 	}
 	this->script_map[into_name] = root_module;
 }
-struct ScopeStackItem;
-struct ScopeStackItem {
-	std::shared_ptr<BlockContext> context;
-	std::shared_ptr<ScopeStackItem> up;
+struct StackFrame;
+struct StackFrame {
+	std::shared_ptr<FrameContext> context;
+	std::shared_ptr<StackFrame> up;
 	std::vector<Instruction>::const_iterator current_instruction;
+	std::vector<Variable> closed_vars;
 	std::vector<Variable> local_vars;
 	std::vector<Variable> value_stack;
-	ScopeStackItem(
-		std::shared_ptr<BlockContext> ctx,
-		std::shared_ptr<ScopeStackItem> up_ptr)
+	StackFrame(
+		std::shared_ptr<FrameContext> ctx,
+		std::shared_ptr<StackFrame> up_ptr)
 		: context{ctx}, up{up_ptr} {}
 };
 
@@ -1857,25 +1901,26 @@ void ScriptContext::FunctionCall(string func_name) {
 	auto current_context = current_module->root_context;
 	auto current_instruction = current_context->instructions.cbegin();
 	auto end_of_instructions = current_context->instructions.cend();
-	std::vector<std::shared_ptr<ScopeStackItem>> scope_stack;
-	auto current_scope = std::make_shared<ScopeStackItem>(current_context, std::shared_ptr<ScopeStackItem>());
+	std::vector<std::shared_ptr<StackFrame>> scope_stack;
+	std::vector<std::shared_ptr<StackFrame>> closure_frames;
+	auto current_frame = std::make_shared<StackFrame>(current_context, std::shared_ptr<StackFrame>());
 	Variable accumulator;
 	auto show_accum = [&]() {
 		dbg << "A: " << accumulator << '\n';
 	};
 	auto show_vars = [&]() {
 		dbg << "Stack:";
-		if(current_scope->value_stack.empty()) dbg << "<E!>";
-		else for(auto &v : current_scope->value_stack) { dbg << " " << v; }
+		if(current_frame->value_stack.empty()) dbg << "<E!>";
+		else for(auto &v : current_frame->value_stack) { dbg << " " << v; }
 		dbg << " A: " << accumulator;
 		dbg << " Locals:";
-		if(current_scope->local_vars.empty()) dbg << "<E!>";
-		else for(auto &v : current_scope->local_vars) { dbg << " " << v; }
+		if(current_frame->local_vars.empty()) dbg << "<E!>";
+		else for(auto &v : current_frame->local_vars) { dbg << " " << v; }
 		dbg << '\n';
 	};
 	auto pop_value = [&]() {
-		auto value = current_scope->value_stack.back();
-		current_scope->value_stack.pop_back();
+		auto value = current_frame->value_stack.back();
+		current_frame->value_stack.pop_back();
 		return std::move(value);
 	};
 	for(;;) {
@@ -1887,8 +1932,8 @@ void ScriptContext::FunctionCall(string func_name) {
 				current_instruction = next_scope->current_instruction;
 				end_of_instructions = next_scope->context->instructions.cend();
 				current_context = next_scope->context;
-				current_scope = std::move(next_scope);
-				dbg << "Exit to scope: " << current_context->scope_index
+				current_frame = std::move(next_scope);
+				dbg << "Exit to frame: " << current_context->frame_index
 					<< " ins " << (current_instruction - current_context->instructions.cbegin())
 					<< "/" << current_context->instructions.size() << '\n';
 				show_vars();
@@ -1897,32 +1942,74 @@ void ScriptContext::FunctionCall(string func_name) {
 			}
 			break;
 		}
+		auto &ins = current_instruction;
 		auto param = current_instruction->param;
 		auto first_instruction = current_context->instructions.cbegin();
 		dbg << "EXEC: [" << current_instruction - first_instruction << "]" << current_instruction->opcode << " " << param << '\n';
 		switch(current_instruction->opcode) {
-		case Opcode::EnterScope: {
-			auto next_context = current_module->scopes.at(param);
-			current_scope->current_instruction = current_instruction;
-			scope_stack.push_back(current_scope);
-			current_scope = std::make_shared<ScopeStackItem>(next_context, std::move(current_scope));
+		case Opcode::CallExpression: {
+			size_t closure_frame = accumulator.value >> 32;
+			size_t frame_index = accumulator.value & 0xffffffffull;
+			if(accumulator.vtype != VarType::Function || frame_index >= current_module->frames.size()) {
+				dbg << "call to non-function value\n";
+				show_vars();
+				return;
+			}
+			auto next_context = current_module->frames[frame_index];
+			auto &prev_stack = current_frame->value_stack;
+			auto closure_frame_ptr = closure_frames[closure_frame];
+			current_frame->current_instruction = current_instruction;
+			scope_stack.push_back(current_frame);
+			current_frame = std::make_shared<StackFrame>(next_context, closure_frame_ptr);
+			if(param > 0) {
+				// TODO take the argument's values from the stack
+				// and actually give them to the function
+				if(param > prev_stack.size()) {
+					dbg << "stack underflow!\n";
+					return;
+				}
+				prev_stack.erase(prev_stack.cend() - param, prev_stack.cend());
+			}
 			current_instruction = next_context->instructions.cbegin();
 			end_of_instructions = next_context->instructions.cend();
 			current_context = next_context;
-			//current_context->locals
-			current_scope->local_vars.reserve(current_context->locals.size());
-			std::ranges::for_each(current_context->locals, [&](auto &v) {
-				current_scope->local_vars.push_back(v.value);
-				});
-			show_vars();
 			continue;
+		}
+		case Opcode::LoadClosure: {
+			dbg << "load closure: " << param << " TODO capture scope variables\n";
+			// param is scope_id
+			size_t current_closure = closure_frames.size();
+			closure_frames.push_back(current_frame);
+			accumulator = Variable{param | (current_closure << 32), VarType::Function};
+			show_accum();
+			break;
 		}
 		case Opcode::LoadConst:
 			accumulator = Variable{param, VarType::Integer};
 			break;
 		case Opcode::PushRegister:
-			current_scope->value_stack.push_back(accumulator);
+			current_frame->value_stack.push_back(accumulator);
 			show_vars();
+			break;
+		case Opcode::PopRegister:
+			accumulator = pop_value();
+			show_vars();
+			break;
+		case Opcode::PopStack:
+			pop_value();
+			show_vars();
+			break;
+		case Opcode::LoadStack:
+			if(param >= current_frame->value_stack.size()) {
+				accumulator = Variable{};
+			} else {
+				accumulator = *(current_frame->value_stack.crbegin() + param);
+			}
+			break;
+		case Opcode::StoreStack:
+			if(param < current_frame->value_stack.size()) {
+				*(current_frame->value_stack.rend() + param) = accumulator;
+			}
 			break;
 		case Opcode::AddInteger:
 			accumulator = Variable{pop_value().value + accumulator.value};
@@ -1967,7 +2054,7 @@ void ScriptContext::FunctionCall(string func_name) {
 			break;
 		}
 		case Opcode::Negate:
-			accumulator = Variable{-accumulator.value};
+			accumulator = Variable{-static_cast<int64_t>(accumulator.value)};
 			show_accum();
 			break;
 		case Opcode::OrInteger:
@@ -2035,45 +2122,45 @@ void ScriptContext::FunctionCall(string func_name) {
 		case Opcode::LoadUnit:
 			accumulator = Variable{0, VarType::Unit};
 			break;
-		case Opcode::LoadClosure: {
-			dbg << "load closure: " << param << " TODO capture scope variables\n";
-			// param is scope_id
-			accumulator = Variable{param, VarType::Function};
+		case Opcode::LoadVariable: {
+			uint32_t up_count = ins->param_a;
+			dbg << "load variable: " << up_count << "," << ins->param_b << ": ";
+			auto search_context = current_frame.get();
+			for(;up_count != 0; up_count--) {
+				search_context = search_context->up.get();
+				if(search_context == nullptr) {
+					dbg << "frame depth error\n";
+					return;
+				}
+			}
+			auto &var_list = search_context->context->var_declarations;
+			if(ins->param_b >= var_list.size()) {
+				dbg << "reference out of bounds\n";
+				return;
+			}
+			auto &var_decl = var_list.at(ins->param_b);
+			// found variable case
+			accumulator = search_context->local_vars[var_decl.stack_pos];
 			show_accum();
 			break;
 		}
-		case Opcode::LoadVariable: {
-			dbg << "load variable: " << current_module->string_table.at(param) << ": ";
-			auto search_context = current_scope.get();
-			for(;;) {
-				if(search_context == nullptr) {
-					dbg << "not found\n";
-					return;
-				}
-				auto found = std::ranges::find(search_context->context->locals, param, &VariableDeclaration::name_index);
-				if(found == search_context->context->locals.cend()) {
-					search_context = search_context->up.get();
-					continue;
-				}
-				// found variable case
-				accumulator = search_context->local_vars[found - search_context->context->locals.cbegin()];
-				show_accum();
-				break;
-			}
-			break;
-		}
 		case Opcode::AssignLocal: {
-			auto local_name = current_context->locals[param].name_index;
-			dbg << "assign local variable: "
-				<< current_module->string_table.at(local_name)
+			auto &var_decl = current_context->var_declarations[param];
+			dbg << "assign local variable: [" << var_decl.stack_pos << "]"
+				<< current_module->string_table.at(var_decl.name_index)
 				<< '\n';
-			current_scope->local_vars.at(param) = accumulator;
+			if(var_decl.stack_pos == current_frame->local_vars.size()) {
+				current_frame->local_vars.push_back(accumulator);
+			} else {
+				current_frame->local_vars.at(var_decl.stack_pos) = accumulator;
+			}
 			show_vars();
 			break;
 		}
 		case Opcode::ExitScope: {
-			current_instruction = end_of_instructions;
-			continue;
+			current_frame->local_vars.resize(param);
+			show_vars();
+			break;
 		}
 		default:
 			dbg << "not implemented: " << current_instruction->opcode << '\n';
