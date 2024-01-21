@@ -1,22 +1,12 @@
 
-#include <string>
-#include <memory>
-namespace Fae {
-class ScriptContext {
-public:
+#include "script.hpp"
 
-	ScriptContext();
-	virtual ~ScriptContext();
-
-	virtual void FunctionCall(std::string);
-	virtual void LoadScriptFile(std::string f, std::string i);
-};
-}
-
+using namespace std::string_literals;
+using namespace std::string_view_literals;
 int main(int argc, char**argv) {
 	auto script = std::make_unique<Fae::ScriptContext>();
-	script->LoadScriptFile("test", "init");
-	//script->FunctionCall("init");
+	script->LoadScriptFile("test"s, "init"s);
+	script->FunctionCall("init"s);
 	return 0;
 }
 
