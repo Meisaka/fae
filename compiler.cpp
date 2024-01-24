@@ -16,6 +16,17 @@ namespace Fae {
 
 using string = std::string;
 
+template<class R, class P>
+auto find_last_if(const R &r, P pred) {
+	auto end_itr = r.cend();
+	auto search_itr = end_itr;
+	auto begin_itr = r.cbegin();
+	while(search_itr != begin_itr) {
+		search_itr--;
+		if(pred(*search_itr)) return search_itr;
+	}
+	return end_itr;
+};
 ScriptContext::ScriptContext() {}
 ScriptContext::~ScriptContext() {}
 
@@ -354,6 +365,7 @@ const ParserKeyword keyword_table[] = {
 	{"."sv ,token_t::O_Dot},
 	{"..="sv ,token_t::RangeIncl},
 	{"./%"sv ,token_t::Ident},
+	{"->"sv ,token_t::Arrow},
 };
 struct Precedence {
 	uint8_t prec;
@@ -484,6 +496,9 @@ struct ASTNode {
 struct ExprStackItem {
 	ASTNode *block;
 	expr_list_t &expr_list;
+	bool obj_ident;
+	ExprStackItem(ASTNode *n, expr_list_t &e)
+		: block{n}, expr_list{e}, obj_ident{false} {}
 };
 std::ostream &operator<<(std::ostream &os, token_t tk) {
 	return os << token_name(tk);
@@ -533,6 +548,7 @@ std::ostream &operator<<(std::ostream &os, const ASTNode &node) {
 #define PUSH_INTO(d, s) (d)->expressions.emplace_back(std::move(s));
 #define EXprev 2
 #define REMOV_EX(n) expr_list.erase(expr_list.cend() - n)
+#define REMOV_EXthird expr_list.erase(expr_list.cend() - 3)
 #define REMOV_EXprev expr_list.erase(expr_list.cend() - 2)
 #define REMOV_EXhead expr_list.pop_back()
 #define REMOVE_EXPR(ex) ex
@@ -604,7 +620,7 @@ std::ostream &operator<<(std::ostream &os, const Variable &v) {
 	f(Negate) f(Not) \
 	f(AndInteger) f(OrInteger) f(XorInteger) \
 	f(LSHInteger) f(RSHLInteger) f(RSHAInteger) \
-	f(CompareLess) f(CompareGreater) f(CompareEqual)
+	f(CompareLess) f(CompareGreater) f(CompareEqual) f(CompareNotEqual)
 enum class Opcode {
 #define GENERATE(f) f,
 	DEF_OPCODES(GENERATE)
@@ -658,13 +674,22 @@ std::ostream &operator<<(std::ostream &os, const VariableDeclaration &v) {
 	return os;
 }
 
+struct LoopContext {
+	size_t loop_pos;
+	std::vector<size_t> exit_points;
+	LoopContext(size_t p) : loop_pos{p} {}
+};
+struct FrameScopeContext {
+	size_t depth;
+	std::unique_ptr<LoopContext> loop;
+};
 struct FrameContext {
 	std::shared_ptr<FrameContext> up;
 	size_t frame_index;
 	std::vector<VariableDeclaration> var_declarations;
 	std::vector<VariableDeclaration> arg_declarations;
 	size_t current_depth;
-	std::vector<size_t> scope_depths;
+	std::vector<FrameScopeContext> scopes;
 	std::vector<Instruction> instructions;
 	FrameContext(size_t scope_id) : frame_index{scope_id}, current_depth{0} {}
 	FrameContext(size_t scope_id, std::shared_ptr<FrameContext> &up_ptr)
@@ -725,16 +750,16 @@ bool convert_number_bin(std::string_view raw_number, uint64_t &output) {
 	return true;
 }
 
-bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_ptr<FrameContext> &ctx, const node_ptr &expr) {
+bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_ptr<FrameContext> &ctx, const node_ptr &expr) {
 	auto show_position = [&](const LexTokenRange &block) {
-		auto file_start = module_ctx->file_source.cbegin();
+		auto file_start = module_ctx.file_source.cbegin();
 		size_t offset = block.tk_begin - file_start;
-		auto found = std::ranges::lower_bound(module_ctx->line_positions, offset);
-		if(found == module_ctx->line_positions.cend()) {
+		auto found = std::ranges::lower_bound(module_ctx.line_positions, offset);
+		if(found == module_ctx.line_positions.cend()) {
 			dbg << "char:" << offset;
 			return;
 		}
-		auto lines_start = module_ctx->line_positions.cbegin();
+		auto lines_start = module_ctx.line_positions.cbegin();
 		size_t prev_pos = 0;
 		if(found != lines_start) prev_pos = *(found - 1);
 		size_t line = (found - lines_start) + 1;
@@ -756,7 +781,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 		uint32_t decl_index = 0;
 		for(;;) {
 			if(search_context == nullptr) {
-				dbg << "variable not found: " << module_ctx->string_table[string_index] << "\n";
+				dbg << "variable not found: " << module_ctx.string_table[string_index] << "\n";
 				return std::optional<variable_pos>();
 			}
 			auto found = std::ranges::find(search_context->var_declarations, string_index, &VariableDeclaration::name_index);
@@ -771,7 +796,43 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 		}
 	};
 	auto str_table = [&](size_t string_index) {
-		return module_ctx->string_table[string_index];
+		return module_ctx.string_table[string_index];
+	};
+	auto begin_scope = [&]() {
+		ctx->scopes.push_back({ctx->current_depth});
+	};
+	auto begin_loop_scope = [&](size_t ins_pos_reloop) {
+		ctx->scopes.push_back({
+			ctx->current_depth,
+			std::make_unique<LoopContext>( ins_pos_reloop )
+		});
+	};
+	auto end_scope = [&]() {
+		if(ctx->scopes.empty()) return;
+		auto &scope = ctx->scopes.back();
+		if(scope.loop) {
+			size_t end_pos = ctx->instructions.size();
+			for(auto point : scope.loop->exit_points) {
+				ctx->instructions[point].param = end_pos;
+			}
+		}
+		if(scope.depth != ctx->current_depth)
+			ctx->instructions.emplace_back(Instruction{Opcode::ExitScope, scope.depth});
+		ctx->scopes.pop_back();
+	};
+	auto leave_to_scope = [&](auto scope_itr) {
+		auto end_itr = ctx->scopes.end();
+		auto search_itr = end_itr;
+		size_t leave_depth = scope_itr->depth;
+		while(search_itr != scope_itr) {
+			search_itr--;
+			if(search_itr->depth != leave_depth) {
+				ctx->instructions.emplace_back(
+					Instruction{Opcode::ExitScope,
+					search_itr->depth}
+				);
+			}
+		}
 	};
 	dbg << "Expr:" << expr->ast_token << " ";
 	switch(expr->asc) {
@@ -780,14 +841,12 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			dbg << "unhandled block type: " << expr->ast_token << '\n';
 			return false;
 		}
-		size_t current_depth = ctx->current_depth;
-		ctx->scope_depths.push_back(current_depth);
+		begin_scope();
 		for(auto &walk_node : expr->expressions) {
 			if(!walk_expression(dbg, module_ctx, ctx, walk_node))
 				return false;
 		}
-		if(current_depth != ctx->current_depth)
-			ctx->instructions.emplace_back(Instruction{Opcode::ExitScope, current_depth});
+		end_scope();
 		//for(auto &ins : block_context->instructions) dbg << ins << '\n';
 		if(IS_TOKEN(expr, Block)) {
 			dbg << "block end\n";
@@ -823,18 +882,18 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 					show_syn_error("Let assignment expression", item);
 					return false;
 				}
-				size_t string_index = module_ctx->find_or_put_string(
+				size_t string_index = module_ctx.find_or_put_string(
 					item->expressions.front()->block.as_string() );
 				if(!walk_expression(dbg, module_ctx, ctx, item->expressions[1])) return false;
 				size_t var_index = ctx->current_depth++;
 				size_t decl_index = ctx->var_declarations.size();
 				ctx->var_declarations.emplace_back(VariableDeclaration{string_index, var_index, is_mutable});
-				dbg << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << module_ctx->string_table[string_index] << " = \n";
+				dbg << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << module_ctx.string_table[string_index] << " = \n";
 				// assign the value
 				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, decl_index});
 				return true;
 			} else if(IS_TOKEN(item, Ident)) {
-				size_t string_index = module_ctx->find_or_put_string(item->block.as_string());
+				size_t string_index = module_ctx.find_or_put_string(item->block.as_string());
 				dbg << "TODO let decl " << "\n";
 				return true;
 			} else {
@@ -843,6 +902,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			return false;
 		}
 		case token_t::K_If: {
+			if(!AT_EXPR_TARGET(expr)) {
+				show_syn_error("If expression", expr);
+				return false;
+			}
 			auto walk_expr = expr->expressions.cbegin();
 			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
 			walk_expr++;
@@ -851,32 +914,37 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
 			walk_expr++;
 			std::vector<size_t> exit_positions;
-			exit_positions.push_back(ctx->instructions.size());
-			ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
+			bool hanging_elseif = false;
 			if(walk_expr == expr->expressions.cend()) { // no else or elseif
 				ctx->instructions[skip_pos].param = ctx->instructions.size();
-				ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, 0});
-				// TODO the unit type
+				//ctx->instructions.emplace_back(Instruction{Opcode::LoadUnit, 0});
 			} else while(walk_expr != expr->expressions.cend()) {
 				if(IS_TOKEN((*walk_expr), K_ElseIf)) {
 					if((*walk_expr)->expressions.size() != 2) {
 						show_syn_error("ElseIf", *walk_expr);
 						return false;
 					}
-					// fixup the previous test's jump
+					// cause the previous "if" to exit
+					exit_positions.push_back(ctx->instructions.size());
+					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
+					// fixup the previous test's "else" jump
 					ctx->instructions[skip_pos].param = ctx->instructions.size();
 					// test expression
 					if(!walk_expression(dbg, module_ctx, ctx, (*walk_expr)->expressions[0])) return false;
 					skip_pos = ctx->instructions.size();
+					hanging_elseif = true; // "else" jump exits if no more branches
 					ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
 					if(!walk_expression(dbg, module_ctx, ctx, (*walk_expr)->expressions[1])) return false;
-					exit_positions.push_back(ctx->instructions.size());
-					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
 				} else if(IS_TOKEN((*walk_expr), K_Else)) {
 					if((*walk_expr)->expressions.size() != 1) {
 						show_syn_error("Else", *walk_expr);
 						return false;
 					}
+					hanging_elseif = false;
+					// cause the previous "if" to exit
+					exit_positions.push_back(ctx->instructions.size());
+					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
+					// fixup the previous test's "else" jump
 					ctx->instructions[skip_pos].param = ctx->instructions.size();
 					if(!walk_expression(dbg, module_ctx, ctx, (*walk_expr)->expressions[0])) return false;
 					break;
@@ -887,8 +955,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				walk_expr++;
 			}
 			// fixup the exit points
+			size_t exit_point = ctx->instructions.size();
+			if(hanging_elseif) ctx->instructions[skip_pos].param = exit_point;
 			for(auto pos : exit_positions) {
-				ctx->instructions[pos].param = ctx->instructions.size();
+				ctx->instructions[pos].param = exit_point;
 			}
 			return true;
 		}
@@ -907,9 +977,37 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			}
 			auto &inner_expr = expr->expressions.front();
 			size_t loop_point = ctx->instructions.size();
-			// TODO inner scope needs instruction pointers for break/continue;
+			begin_loop_scope(loop_point);
 			if(!walk_expression(dbg, module_ctx, ctx, inner_expr)) return false;
 			ctx->instructions.emplace_back(Instruction{Opcode::Jump, loop_point});
+			end_scope();
+			return true;
+		}
+		case token_t::K_Break: {
+			auto found = find_last_if(ctx->scopes, [](const auto &e) -> bool {
+				return e.loop || false;
+			});
+			if(found == ctx->scopes.cend()) {
+				show_syn_error("Continue without Loop", expr);
+				return false;
+			}
+			if(!walk_expression(dbg, module_ctx, ctx, expr->expressions.front())) return false;
+			leave_to_scope(found);
+			found->loop->exit_points.push_back(ctx->instructions.size());
+			ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
+			return true;
+		}
+		case token_t::K_Continue: {
+			auto found = find_last_if(ctx->scopes, [](const auto &e) -> bool {
+				return e.loop || false;
+			});
+			if(found == ctx->scopes.cend()) {
+				show_syn_error("Continue without Loop", expr);
+				return false;
+			}
+			leave_to_scope(found);
+			ctx->instructions.emplace_back(
+				Instruction{Opcode::Jump, found->loop->loop_pos });
 			return true;
 		}
 		case token_t::K_Until:
@@ -920,9 +1018,9 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				else show_syn_error("While expression", expr);
 				return false;
 			}
-			size_t current_depth = ctx->var_declarations.size();
 			auto walk_expr = expr->expressions.cbegin();
 			size_t loop_point = ctx->instructions.size();
+			begin_loop_scope(loop_point);
 			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
 			walk_expr++;
 			size_t jump_ins = ctx->instructions.size();
@@ -930,10 +1028,12 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
 			else ctx->instructions.emplace_back(Instruction{Opcode::JumpIf, 0});
 			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
+			dbg << "end " << expr->ast_token
+				<< " jump_pos=" << ctx->instructions.size()
+				<< " loop_point=" << loop_point << '\n';
 			ctx->instructions.emplace_back(Instruction{Opcode::Jump, loop_point});
 			ctx->instructions[jump_ins].param = ctx->instructions.size();
-			if(current_depth != ctx->var_declarations.size())
-				ctx->instructions.emplace_back(Instruction{Opcode::ExitScope, current_depth});
+			end_scope();
 			// for(auto &ins : ctx->instructions) dbg << ins << '\n';
 			return true;
 		}
@@ -1011,7 +1111,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				return false;
 			}
 			auto arg_string = expr->expressions[0]->block.as_string();
-			size_t string_index = module_ctx->find_or_put_string(arg_string);
+			size_t string_index = module_ctx.find_or_put_string(arg_string);
 			auto search_context = ctx.get();
 			uint32_t up_count = 0;
 			uint32_t arg_index = 0;
@@ -1042,7 +1142,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			auto &right_ref = expr->expressions.back();
 			if(IS_TOKEN(left_ref, Ident)) {
 				// ok! lookup variable
-				auto string_index = module_ctx->find_or_put_string(left_ref->block.as_string());
+				auto string_index = module_ctx.find_or_put_string(left_ref->block.as_string());
 				auto var_pos = get_var_ref(string_index);
 				if(!var_pos.has_value()) {
 					dbg << "variable not found: " << str_table(string_index) << "\n";
@@ -1073,7 +1173,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				show_syn_error("Dot operator", expr);
 				return false;
 			}
-			size_t string_index = module_ctx->find_or_put_string(
+			size_t string_index = module_ctx.find_or_put_string(
 				expr->expressions[1]->block.as_string() );
 			ctx->instructions.emplace_back(Instruction{Opcode::NamedLookup, string_index});
 			return true;
@@ -1135,6 +1235,9 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 		case token_t::O_EqEq:
 			ctx->instructions.emplace_back(Instruction{Opcode::CompareEqual, 0});
 			return true;
+		case token_t::O_NotEq:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareNotEqual, 0});
+			return true;
 		default:
 			dbg << "unhandled operator: " << expr->ast_token << "\n";
 		}
@@ -1191,10 +1294,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadBool, 0});
 			return true;
 		case token_t::Ident: {
-			auto string_index = module_ctx->find_or_put_string(expr->block.as_string());
+			auto string_index = module_ctx.find_or_put_string(expr->block.as_string());
 			auto var_pos = get_var_ref(string_index);
 			if(!var_pos.has_value()) {
-				dbg << "variable not found: " << module_ctx->string_table[string_index] << "\n";
+				dbg << "variable not found: " << module_ctx.string_table[string_index] << "\n";
 				return false;
 			}
 			ctx->instructions.emplace_back(
@@ -1213,7 +1316,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 					return false;
 				}
 			}
-			size_t string_index = module_ctx->find_or_put_string(s);
+			size_t string_index = module_ctx.find_or_put_string(s);
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadString, string_index});
 			return true;
 		}
@@ -1231,8 +1334,8 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 			return false;
 		}
 		dbg << "TODO function start " << expr->block.as_string() << '\n';
-		auto function_context = std::make_shared<FrameContext>(module_ctx->frames.size(), ctx);
-		module_ctx->frames.push_back(function_context);
+		auto function_context = std::make_shared<FrameContext>(module_ctx.frames.size(), ctx);
+		module_ctx.frames.push_back(function_context);
 		ctx->instructions.emplace_back(Instruction{Opcode::LoadClosure, function_context->frame_index});
 		// expr_args // TODO named argument list for the function declaration
 		auto &expr_args = expr->expressions[0];
@@ -1241,7 +1344,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 				auto &arg1 = expr_args->expressions[0];
 				if(IS_TOKEN(arg1, Ident)) {
 					auto string_index =
-						module_ctx->find_or_put_string(arg1->block.as_string());
+						module_ctx.find_or_put_string(arg1->block.as_string());
 					function_context->arg_declarations.emplace_back(
 						VariableDeclaration{string_index, 0});
 				} else {
@@ -1257,7 +1360,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext *module_ctx, std::shared_p
 					return false;
 				}
 				auto string_index =
-					module_ctx->find_or_put_string(arg->block.as_string());
+					module_ctx.find_or_put_string(arg->block.as_string());
 				function_context->arg_declarations.emplace_back(
 					VariableDeclaration{string_index,
 					function_context->arg_declarations.size()});
@@ -1315,7 +1418,7 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 		bool show = true;
 		auto collapse_expr = [&](bool terminating) {
 			auto &expr_list = current_block->expr_list;
-			node_ptr expr_hold;
+			std::vector<node_ptr> expr_hold;
 			// try to collapse the expression list
 			while(true) {
 				if(expr_list.size() < 2) break;
@@ -1327,15 +1430,15 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 				auto &third = expr_list.size() >= 3 ? *(expr_list.end() - 3) : empty;
 				auto &fourth = expr_list.size() >= 4 ? *(expr_list.end() - 4) : empty;
 				if(!head || !prev) return;
-				if(IS_CLASS(head, RawOper)
-					&& (IS_CLASS(prev, Start) || IS_CLASS(prev, BlockExpr)))
-				{
+				if((IS_CLASS(prev, Start) || IS_CLASS(prev, BlockExpr))
+					&& IS_CLASS(head, RawOper)
+				) {
 					// before: (value Start) (oper Raw)
 					//  after: (oper OperOpen (value Start))
 					head->asc = Expr::OperExpr;
 					PUSH_INTO(head, prev);
 					REMOVE1(prev);
-					dbg << "\n<op_to_expr>";
+					dbg << "\n<RawOp>";
 				} else if(terminating &&
 					IS_CLASS(prev, FuncExpr) && !AT_EXPR_TARGET(prev)
 					&& (
@@ -1374,13 +1477,19 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 						MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
 						PUSH_INTO(comma_list, prev);
 					}
-					auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
 					auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
-					PUSH_INTO(let_assign, third);
-					third = std::move(let_expr);
+					bool is_obj = IS_TOKEN(current_block->block, Object);
+					if(!is_obj) {
+						auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
+						PUSH_INTO(let_assign, third);
+						third = std::move(let_expr);
+					}
 					prev = std::move(let_assign);
 					CONV_N(head, FuncExpr, 2);
 					PUSH_INTO(head, comma_list);
+					if(is_obj) {
+						REMOVE1(third);
+					}
 				} else if(third
 					&& (IS_TOKEN(third, K_Let) && AT_EXPR_TARGET(third) && IS_TOKEN(third->expressions.back(), Ident))
 					&& IS_CLASS(head, FuncDecl)
@@ -1407,14 +1516,19 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					IS_CLASS(head, FuncDecl)
 					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
 				) {
-					auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev);
-					auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, prev);
+					bool is_obj = IS_TOKEN(current_block->block, Object);
+					auto prev_ptr = prev.get();
+					auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, prev_ptr);
 					PUSH_INTO(let_assign, prev);
-					prev = std::move(let_expr);
+					if(!is_obj) {
+						auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev_ptr);
+						prev = std::move(let_expr);
+					}
 					auto MAKE_NODE_FROM1(comma_list, Func, CommaList, head);
 					CONV_N(head, FuncExpr, 2);
 					PUSH_INTO(head, comma_list);
-					expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
+					if(!is_obj) expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
+					else prev = std::move(let_assign);
 					// named function with no args or anon with comma arg list
 					dbg << "\n<func no args?>";
 				} else if(IS_CLASS(head, FuncDecl) && (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))) {
@@ -1434,7 +1548,16 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					&& (
 						IS_CLASS(head, Start)
 						|| IS_FULLEXPR(head)
-						|| IS_CLASS(head, BlockExpr))
+						|| IS_CLASS(head, BlockExpr)
+						|| (AT_EXPR_TARGET(head)
+							&& (IS_TOKEN(head, K_Break)
+								|| IS_TOKEN(head, K_Continue)
+								|| IS_TOKEN(head, K_If)
+								|| IS_TOKEN(head, K_Loop)
+								|| IS_TOKEN(head, K_While)
+								|| IS_TOKEN(head, K_Until)
+							)
+						))
 				) {
 					dbg << "<KeyEx>";
 					if(!AT_EXPR_TARGET(prev)) {
@@ -1471,8 +1594,33 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					prev->asc = Expr::Start;
 					dbg << "<DotArray>";
 					continue;
+				} else if(terminating
+					&& IS_OPENEXPR(prev) && IS_TOKEN(head, O_Dot)
+					&& head->expressions.size() == 0
+					&& head->meta_value > 0
+				) {
+					head->meta_value = 0;
+					continue;
+				} else if(!terminating
+					&& IS_CLASS(prev, OperExpr)
+					&& IS_TOKEN(prev, O_Dot)
+					&& prev->meta_value == 1
+					&& prev->expressions.size() == 0
+					&& (prev->newline || prev->whitespace)
+					&& (
+					IS_CLASS(head, Start)
+					|| IS_CLASS(head, BlockExpr)
+					|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
+				)) {
+					dbg << "<DotNLCv>";
+					prev->meta_value = 0;
+					expr_hold.emplace_back(std::move(head));
+					REMOVE1(head);
+					terminating = true;
+					continue;
 				} else if(terminating && IS_OPENEXPR(prev) && (
 					IS_CLASS(head, Start)
+					|| IS_CLASS(head, BlockExpr)
 					|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
 				)) {
 					// before: (oper OperOpen (value Start)) (value Start)
@@ -1520,7 +1668,9 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 					} else if(
 						terminating
 						&& IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
-						&& IS_TOKEN(head, K_Else) && AT_EXPR_TARGET(head)
+						&& !IS_TOKEN(prev->expressions.back(), K_Else)
+						&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
+						&& AT_EXPR_TARGET(head)
 					) {
 						PUSH_INTO(prev, head);
 						REMOVE1(head);
@@ -1548,10 +1698,10 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 							PUSH_INTO(third, prev);
 							REMOVE1(prev);
 						} else {
-							dbg << "\n<unhandled Key Key\nT:"
+							dbg << "\n<unhandled" << terminating << " Key Key\nT:"
 								<< third->ast_token << " " << third->asc
-								<< "\nL:" << prev->ast_token << " " << prev->asc
-								<< "\nR:" << head->ast_token << " " << prev->asc << ">";
+								<< "\nL:" << prev
+								<< "\nR:" << head << ">";
 						}
 					} else {
 						dbg << "\n<unhandled KeywExpr KeywExpr\nL:" << prev << "\nR:" << head << ">";
@@ -1581,33 +1731,35 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 							continue;
 						}
 					}
-					if(!terminating && !expr_hold) {
+					if(!terminating) {
 						//dbg << "\n<collapse_expr before " << head << ">";
 						terminating = true;
-						expr_hold = std::move(expr_list.back());
+						expr_hold.emplace_back(std::move(expr_list.back()));
 						REMOVE1(head);
 						continue;
 					}
 					dbg << "\n<unhandled lookahead>" << prev << "\nR:" << head << '\n';
-				} else if(!terminating && IS_TOKEN(head, Semi) && !expr_hold) {
+				} else if(!terminating && IS_TOKEN(head, Semi)) {
 					dbg << "\n<collapse_expr semi>";
 					terminating = true;
-					expr_hold = std::move(expr_list.back());
+					expr_hold.emplace_back(std::move(expr_list.back()));
 					REMOVE1(head);
 					continue;
-				} else if(terminating && IS_CLASS(prev, RawOper) && (
+				} else if(terminating && IS_CLASS(prev, RawOper)
+					&& (IS_TOKEN(prev, O_Sub)
+						|| (IS_TOKEN(prev, O_Dot)
+							&& !prev->whitespace && !prev->newline)
+					) && (
 						IS_CLASS(head, Start) ||
 						IS_FULLEXPR(head) ||
 						IS_CLASS(head, BlockExpr)
 					)) {
-					if(IS_TOKEN(prev, O_Sub) || IS_TOKEN(prev, O_Dot)) {
-						if(IS_TOKEN(prev, O_Sub))
-							prev->ast_token = token_t::O_Minus;
-						prev->asc = Expr::OperExpr;
-						prev->meta_value = 1;
-						prev->precedence = get_precedence(prev->ast_token);
-						continue;
-					}
+					if(IS_TOKEN(prev, O_Sub))
+						prev->ast_token = token_t::O_Minus;
+					prev->asc = Expr::OperExpr;
+					prev->meta_value = 1;
+					prev->precedence = get_precedence(prev->ast_token);
+					continue;
 				} else if((
 					IS_OPENEXPR(prev)
 					|| IS_CLASS(prev, Delimiter)
@@ -1717,9 +1869,10 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 				}
 				break;
 			}
-			if(expr_hold) {
+			while(expr_hold.size() > 0) {
 				//dbg << "\n<END collapse_expr before " << expr_hold << ">";
-				expr_list.emplace_back(std::move(expr_hold));
+				expr_list.emplace_back(std::move(expr_hold.back()));
+				expr_hold.pop_back();
 			}
 		};
 		auto start_expr = [&](std::unique_ptr<ASTNode> new_node) {
@@ -1745,6 +1898,7 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			collapse_expr(false);
 			block_stack.emplace_back(std::move(current_block));
 			current_block = std::make_unique<ExprStackItem>(ExprStackItem{ptr_block, ptr_block->expressions});
+			current_block->obj_ident = lex_range.token == token_t::Object;
 			dbg << "(begin block '" << token_string << "' ";
 			show = false;
 			break;
@@ -1785,6 +1939,8 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 		case token_t::Newline:
 			if(!current_block->expr_list.empty())
 				current_block->expr_list.back()->newline = true;
+			if(IS_TOKEN(current_block->block, Object))
+				current_block->obj_ident = true;
 			// fallthrough
 		case token_t::White:
 			if(!current_block->expr_list.empty())
@@ -1889,7 +2045,6 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			case token_t::O_Not:
 				start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::OperExpr, 1, lex_range));
 				break;
-			case token_t::O_Assign:
 			case token_t::O_Dot:
 			case token_t::O_Add:
 			case token_t::O_Sub:
@@ -1903,8 +2058,6 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			case token_t::O_Lsh:
 			case token_t::O_RAsh:
 			case token_t::O_Power:
-			case token_t::O_DotP:
-			case token_t::O_Cross:
 			case token_t::O_Less:
 			case token_t::O_LessEq:
 			case token_t::O_Greater:
@@ -1914,6 +2067,31 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 				start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
 				dbg << "<Op2" << lex_range.token << ">";
 				break;
+			case token_t::Arrow:
+				if(IS_TOKEN(current_block->block, Object) && current_block->obj_ident) {
+					current_block->obj_ident = false;
+					start_expr(std::make_unique<ASTNode>(token_t::O_Assign, Expr::RawOper, 2, lex_range));
+				} else {
+					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
+				}
+				dbg << "<Op2" << lex_range.token << ">";
+				break;
+			case token_t::O_Assign:
+				if(IS_TOKEN(current_block->block, Object))
+					current_block->obj_ident = false;
+				start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
+				dbg << "<Op2" << lex_range.token << ">";
+				break;
+			case token_t::O_DotP:
+			case token_t::O_Cross:
+				if(current_block->obj_ident) {
+					current_block->obj_ident = false;
+					start_expr(std::make_unique<ASTNode>(token_t::Ident, Expr::Start, 2, lex_range));
+				} else {
+					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
+					dbg << "<Op2" << lex_range.token << ">";
+				}
+				break;
 			default:
 				dbg << "Unhandled:" << lex_range.token;
 				break;
@@ -1922,6 +2100,8 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 		}
 		case token_t::Semi: {
 			terminal_expr();
+			if(IS_TOKEN(current_block->block, Object))
+				current_block->obj_ident = true;
 			start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::End, lex_range));
 			break;
 		}
@@ -2061,11 +2241,11 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 	dbg << "\nTree Walk\n";
 	root_module->root_context = std::make_shared<FrameContext>(FrameContext{0});
 	root_module->frames.push_back(root_module->root_context);
-	dbg << "\nLine table:\n";
-	for(auto itr = root_module->line_positions.cbegin(); itr != root_module->line_positions.cend(); itr++) {
-		dbg << "[" << itr - root_module->line_positions.cbegin() << "]" << *itr << '\n';
-	}
-	walk_expression(dbg, root_module.get(), root_module->root_context, root_node);
+	// dbg << "\nLine table:\n";
+	// for(auto itr = root_module->line_positions.cbegin(); itr != root_module->line_positions.cend(); itr++) {
+	// 	dbg << "[" << itr - root_module->line_positions.cbegin() << "]" << *itr << '\n';
+	// }
+	walk_expression(dbg, *root_module.get(), root_module->root_context, root_node);
 	dbg << "\nString table:\n";
 	for(auto itr = root_module->string_table.cbegin(); itr != root_module->string_table.cend(); itr++) {
 		dbg << "[" << itr - root_module->string_table.cbegin() << "]" << *itr << '\n';
@@ -2102,6 +2282,7 @@ void ScriptContext::FunctionCall(string func_name) {
 	}
 	auto dbg_file = std::fstream("./debug-run.txt", std::ios_base::out | std::ios_base::trunc);
 	auto &dbg = dbg_file;
+	auto number_of_instructions_run = 0;
 	auto current_module = found->second;
 	auto current_context = current_module->root_context;
 	auto current_instruction = current_context->instructions.cbegin();
@@ -2328,6 +2509,26 @@ void ScriptContext::FunctionCall(string func_name) {
 				, VarType::Bool};
 			show_vars();
 			break;
+		case Opcode::CompareNotEqual: {
+			auto lh = pop_value();
+			accumulator = Variable{
+				(lh.vtype != accumulator.vtype
+				&& lh.value != accumulator.value
+				) ? uint64_t{1} : uint64_t{0}
+				, VarType::Bool};
+			show_vars();
+			break;
+		}
+		case Opcode::CompareEqual: {
+			auto lh = pop_value();
+			accumulator = Variable{
+				(lh.vtype == accumulator.vtype
+				&& lh.value == accumulator.value
+				) ? uint64_t{1} : uint64_t{0}
+				, VarType::Bool};
+			show_vars();
+			break;
+		}
 		case Opcode::Not:
 			accumulator = Variable{accumulator.value == 0
 				? uint64_t{1} : uint64_t{0}, VarType::Bool};
@@ -2448,6 +2649,10 @@ void ScriptContext::FunctionCall(string func_name) {
 			dbg << "not implemented: " << current_instruction->opcode << '\n';
 		}
 		current_instruction++;
+		if(++number_of_instructions_run > 1000) {
+			dbg << "instruction limit reached, script terminated.\n";
+			return;
+		}
 	}
 }
 
