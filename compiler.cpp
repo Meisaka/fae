@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <iostream>
 #include <fstream>
+#include <stdint.h>
+#include <string_view>
 #include <vector>
 #include <optional>
 #include <unordered_map>
@@ -51,6 +53,7 @@ static bool contains(const std::string_view &str, char c) {
 	f(Invalid) f(Eof) f(White) f(Newline) f(Comma) f(Semi) \
 	f(Ident) f(Keyword) \
 	f(Block) f(Array) f(Object) f(EndDelim) \
+	f(TypeBlock) f(TypeArray) f(TypeObject) \
 	f(DotBlock) f(DotArray) f(DotObject) \
 	f(K_If) f(K_ElseIf) f(K_Else) \
 	f(K_While) f(K_Until) f(K_Loop) f(K_Continue) f(K_Break) \
@@ -59,6 +62,7 @@ static bool contains(const std::string_view &str, char c) {
 	f(K_Let) f(K_Mut) \
 	f(K_True) f(K_False) \
 	f(K_Import) f(K_Export) \
+	f(K_Type) f(K_Enum) \
 	f(O_RefExpr) \
 	f(O_Minus) f(O_Not) f(O_Length) \
 	f(O_And) f(O_Or) f(O_Xor) \
@@ -298,74 +302,114 @@ LexCharClass{ '_', '_', {
 	LexNode(LexAction::DefaultNewToken, token_t::Newline)
 }}
 };
+
+#define DEF_EXPRESSIONS(f) \
+	f(Undefined) \
+	f(CommaList) f(Delimiter) f(End) \
+	f(Start) f(TypeStart) f(BlockExpr) \
+	f(RawOper) f(FuncDecl) \
+	f(OperExpr) f(FuncExpr) f(KeywExpr) \
+	f(TypeDecl) f(TypeExpr)
+enum class Expr {
+#define GENERATE(f) f,
+	DEF_EXPRESSIONS(GENERATE)
+#undef GENERATE
+};
+static std::string_view expr_type_name(Expr e) {
+	switch(e) {
+#define GENERATE(f) case Expr::f: return #f##sv;
+	DEF_EXPRESSIONS(GENERATE)
+#undef GENERATE
+	default: return "INVALID"sv;
+	}
+}
+
+enum class KWA : uint8_t {
+	None, Terminate,
+	ObjIdent, ObjAssign,
+};
 struct ParserKeyword {
 	std::string_view word;
 	token_t token;
+	Expr parse_class;
+	uint8_t meta_value;
+	KWA action;
+	ParserKeyword(std::string_view w, token_t t, Expr c, uint8_t m) :
+		word{w}, token{t}, parse_class{c}, meta_value{m}, action{KWA::None} {}
+	ParserKeyword(std::string_view w, token_t t, Expr c, uint8_t m, KWA act) :
+		word{w}, token{t}, parse_class{c}, meta_value{m}, action{act} {}
 };
 const ParserKeyword keyword_table[] = {
-	{"if"sv, token_t::K_If},
-	{"else"sv, token_t::K_Else},
-	{"elif"sv, token_t::K_ElseIf},
-	{"elsif"sv, token_t::K_ElseIf},
-	{"elseif"sv, token_t::K_ElseIf},
-	{"loop"sv, token_t::K_Loop},
-	{"while"sv, token_t::K_While},
-	{"until"sv, token_t::K_Until},
-	{"continue"sv, token_t::K_Continue},
-	{"end"sv, token_t::K_End},
-	{"break"sv, token_t::K_Break},
-	{"for"sv, token_t::K_For},
-	{"in"sv, token_t::K_In},
-	{"goto"sv, token_t::K_Goto},
-	{"let"sv, token_t::K_Let},
-	{"mut"sv, token_t::K_Mut},
-	{"true"sv, token_t::K_True},
-	{"false"sv, token_t::K_False},
-	{"import"sv, token_t::K_Import},
-	{"export"sv, token_t::K_Export},
-	{"#"sv ,token_t::O_Length},
-	{"!"sv ,token_t::O_Not},
-	{"&"sv ,token_t::O_And},
-	{"|"sv ,token_t::O_Or},
-	{"^"sv ,token_t::O_Xor},
-	{"+"sv ,token_t::O_Add},
-	{"-"sv ,token_t::O_Sub},
-	{"*"sv ,token_t::O_Mul},
-	{"**"sv ,token_t::O_Power},
-	{"/"sv ,token_t::O_Div},
-	{"%"sv ,token_t::O_Mod},
-	{".*"sv ,token_t::O_DotP},
-	{".+"sv ,token_t::O_Cross},
-	{">>"sv ,token_t::O_Rsh},
-	{">>>"sv ,token_t::O_RAsh},
-	{"<<"sv ,token_t::O_Lsh},
-	{"&="sv ,token_t::O_AndEq},
-	{"|="sv ,token_t::O_OrEq},
-	{"^="sv ,token_t::O_XorEq},
-	{"+="sv ,token_t::O_AddEq},
-	{"-="sv ,token_t::O_SubEq},
-	{"*="sv ,token_t::O_MulEq},
-	{"**="sv ,token_t::O_PowerEq},
-	{"/="sv ,token_t::O_DivEq},
-	{"%="sv ,token_t::O_ModEq},
-	{".+="sv ,token_t::O_CrossEq},
-	{">>="sv ,token_t::O_RshEq},
-	{">>>="sv ,token_t::O_RAshEq},
-	{"<<="sv ,token_t::O_LshEq},
-	{"/%"sv ,token_t::O_DivMod},
-	{"-"sv ,token_t::O_Minus},
-	{"<"sv ,token_t::O_Less},
-	{"="sv ,token_t::O_Assign},
-	{">"sv ,token_t::O_Greater},
-	{"<="sv ,token_t::O_LessEq},
-	{">="sv ,token_t::O_GreaterEq},
-	{"=="sv ,token_t::O_EqEq},
-	{"!="sv ,token_t::O_NotEq},
-	{".."sv ,token_t::O_Range},
-	{"."sv ,token_t::O_Dot},
-	{"..="sv ,token_t::RangeIncl},
-	{"./%"sv ,token_t::Ident},
-	{"->"sv ,token_t::Arrow},
+	{"if"sv, token_t::K_If, Expr::KeywExpr, 2},
+	{"else"sv, token_t::K_Else, Expr::KeywExpr, 1},
+	{"elif"sv, token_t::K_ElseIf, Expr::KeywExpr, 2},
+	{"elf"sv, token_t::K_ElseIf, Expr::KeywExpr, 2},
+	{"elsif"sv, token_t::K_ElseIf, Expr::KeywExpr, 2},
+	{"elseif"sv, token_t::K_ElseIf, Expr::KeywExpr, 2},
+	{"loop"sv, token_t::K_Loop, Expr::KeywExpr, 1},
+	{"while"sv, token_t::K_While, Expr::KeywExpr, 2},
+	{"until"sv, token_t::K_Until, Expr::KeywExpr, 2},
+	{"continue"sv, token_t::K_Continue, Expr::KeywExpr, 0},
+	{"end"sv, token_t::K_End, Expr::KeywExpr, 1},
+	{"break"sv, token_t::K_Break, Expr::KeywExpr, 1},
+	{"for"sv, token_t::K_For, Expr::Undefined, 0},
+	{"in"sv, token_t::K_In, Expr::Undefined, 1},
+	{"goto"sv, token_t::K_Goto, Expr::KeywExpr, 1},
+	{"let"sv, token_t::K_Let, Expr::KeywExpr, 1},
+	{"mut"sv, token_t::K_Mut, Expr::KeywExpr, 1},
+	{"true"sv, token_t::K_True, Expr::Start, 0},
+	{"false"sv, token_t::K_False, Expr::Start, 0},
+	{"import"sv, token_t::K_Import, Expr::Undefined, 1},
+	{"export"sv, token_t::K_Export, Expr::Undefined, 1},
+	{"type"sv, token_t::K_Type, Expr::TypeDecl, 2, KWA::Terminate},
+	{"enum"sv, token_t::K_Enum, Expr::TypeDecl, 2, KWA::Terminate},
+	{"#"sv ,token_t::O_Length, Expr::OperExpr, 1},
+	{"!"sv ,token_t::O_Not, Expr::OperExpr, 1},
+	{"&"sv ,token_t::O_And, Expr::RawOper, 2},
+	{"|"sv ,token_t::O_Or, Expr::RawOper, 2},
+	{"^"sv ,token_t::O_Xor, Expr::RawOper, 2},
+	{"+"sv ,token_t::O_Add, Expr::RawOper, 2},
+	{"-"sv ,token_t::O_Sub, Expr::RawOper, 2},
+	{"*"sv ,token_t::O_Mul, Expr::RawOper, 2},
+	{"**"sv ,token_t::O_Power, Expr::RawOper, 2},
+	{"/"sv ,token_t::O_Div, Expr::RawOper, 2},
+	{"%"sv ,token_t::O_Mod, Expr::RawOper, 2},
+	{".*"sv ,token_t::O_DotP, Expr::RawOper, 2, KWA::ObjIdent},
+	{".+"sv ,token_t::O_Cross, Expr::RawOper, 2, KWA::ObjIdent},
+	{">>"sv ,token_t::O_Rsh, Expr::RawOper, 2},
+	{">>>"sv ,token_t::O_RAsh, Expr::RawOper, 2},
+	{"<<"sv ,token_t::O_Lsh, Expr::RawOper, 2},
+	{"&="sv ,token_t::O_AndEq, Expr::RawOper, 2},
+	{"|="sv ,token_t::O_OrEq, Expr::RawOper, 2},
+	{"^="sv ,token_t::O_XorEq, Expr::RawOper, 2},
+	{"+="sv ,token_t::O_AddEq, Expr::RawOper, 2},
+	{"-="sv ,token_t::O_SubEq, Expr::RawOper, 2},
+	{"*="sv ,token_t::O_MulEq, Expr::RawOper, 2},
+	{"**="sv ,token_t::O_PowerEq, Expr::RawOper, 2},
+	{"/="sv ,token_t::O_DivEq, Expr::RawOper, 2},
+	{"%="sv ,token_t::O_ModEq, Expr::RawOper, 2},
+	{".+="sv ,token_t::O_CrossEq, Expr::RawOper, 2, KWA::ObjIdent},
+	{">>="sv ,token_t::O_RshEq, Expr::RawOper, 2},
+	{">>>="sv ,token_t::O_RAshEq, Expr::RawOper, 2},
+	{"<<="sv ,token_t::O_LshEq, Expr::RawOper, 2},
+	/*
+	{"/%"sv ,token_t::O_DivMod,
+	{"-"sv ,token_t::O_Minus,
+	*/
+	{"<"sv ,token_t::O_Less, Expr::RawOper, 2},
+	{"="sv ,token_t::O_Assign, Expr::RawOper, 2, KWA::ObjAssign},
+	{">"sv ,token_t::O_Greater, Expr::RawOper, 2},
+	{"<="sv ,token_t::O_LessEq, Expr::RawOper, 2},
+	{">="sv ,token_t::O_GreaterEq, Expr::RawOper, 2},
+	{"=="sv ,token_t::O_EqEq, Expr::RawOper, 2},
+	{"!="sv ,token_t::O_NotEq, Expr::RawOper, 2},
+	{"."sv ,token_t::O_Dot, Expr::RawOper, 2},
+	{"->"sv ,token_t::Arrow, Expr::RawOper, 2, KWA::ObjAssign},
+	/*
+	{".."sv ,token_t::O_Range,
+	{"..="sv ,token_t::RangeIncl,
+	{"./%"sv ,token_t::Ident,
+	*/
 };
 struct Precedence {
 	uint8_t prec;
@@ -425,7 +469,7 @@ Precedence p_table[] = {
 	{11, token_t::O_Dot},
 };
 constexpr auto p_table_span = std::span{p_table};
-static uint8_t get_precedence(token_t token) {
+static constexpr uint8_t get_precedence(token_t token) {
 	auto found = std::ranges::find(p_table_span, token, &Precedence::token);
 	if(found != p_table_span.end()) {
 		return found->prec;
@@ -446,30 +490,7 @@ struct LexTokenRange {
 		return std::string_view(this->tk_begin + offset, this->tk_end);
 	}
 };
-#define DEF_EXPRESSIONS(f) \
-	f(Delimiter) \
-	f(CommaList) \
-	f(BlockExpr) \
-	f(FuncDecl) \
-	f(FuncExpr) \
-	f(RawOper) \
-	f(OperExpr) \
-	f(KeywExpr) \
-	f(Start) \
-	f(End)
-enum class Expr {
-#define GENERATE(f) f,
-	DEF_EXPRESSIONS(GENERATE)
-#undef GENERATE
-};
-static std::string_view expr_type_name(Expr e) {
-	switch(e) {
-#define GENERATE(f) case Expr::f: return #f##sv;
-	DEF_EXPRESSIONS(GENERATE)
-#undef GENERATE
-	default: return "INVALID"sv;
-	}
-}
+
 struct ASTNode;
 typedef std::unique_ptr<ASTNode> node_ptr;
 typedef std::vector<node_ptr> expr_list_t;
@@ -515,6 +536,8 @@ static void show_node(std::ostream &os, const ASTNode &node, int depth) {
 	if(node.asc == Expr::RawOper
 		|| node.asc == Expr::OperExpr
 		|| node.asc == Expr::KeywExpr
+		|| node.asc == Expr::TypeExpr
+		|| node.asc == Expr::TypeDecl
 		|| node.asc == Expr::BlockExpr)
 		os << " " << static_cast<uint32_t>(node.precedence)
 			<< " " << static_cast<uint32_t>(node.meta_value)
@@ -545,24 +568,42 @@ std::ostream &operator<<(std::ostream &os, const ASTNode &node) {
 	show_node(os, node, 0);
 	return os;
 }
-#define PUSH_INTO(d, s) (d)->expressions.emplace_back(std::move(s));
-#define EXprev 2
-#define REMOV_EX(n) expr_list.erase(expr_list.cend() - n)
-#define REMOV_EXthird expr_list.erase(expr_list.cend() - 3)
-#define REMOV_EXprev expr_list.erase(expr_list.cend() - 2)
-#define REMOV_EXhead expr_list.pop_back()
-#define REMOVE_EXPR(ex) ex
-#define REMOVE1(ex) REMOVE_EXPR(REMOV_EX##ex)
-#define CONV_N(n, t, num) n->asc = Expr::t; n->meta_value = num
+node_ptr POP_EXPR(node_ptr &node) {
+	auto b = std::move(node->expressions.back());
+	node->expressions.pop_back();
+	return std::move(b);
+}
+void push_into(node_ptr &node, node_ptr &&v) {
+	if(node->block.tk_begin > v->block.tk_begin) {
+		node->block.tk_begin = v->block.tk_begin;
+	}
+	if(node->block.tk_end < v->block.tk_end) {
+		node->block.tk_end = v->block.tk_end;
+	}
+	node->expressions.emplace_back(std::move(v));
+}
+#define PUSH_INTO(d, s) push_into(d, std::move(s))
+static constexpr void convert_expr(auto &n, Expr t, uint8_t num) noexcept {
+	n->asc = t; n->meta_value = num;
+}
+#define CONV_N(n, t, num) convert_expr(n, Expr::t, num)
+#define CONV(n, t) n->asc = Expr::t
+static constexpr void convert_token(auto &n, token_t t) noexcept {
+	n->ast_token = t;
+	n->precedence = get_precedence(t);
+}
+#define CONV_TK(n, t) convert_token(n, token_t::t)
 #define EXTEND_TO(t, sl, sr) t->block.tk_begin = sl->block.tk_begin; \
-	t->block.tk_end = sr->block.tk_end;
+	t->block.tk_end = sr->block.tk_end; \
+	t->newline = sr->newline; t->whitespace = sr->whitespace;
 #define AT_EXPR_TARGET(id) (id->expressions.size() >= id->meta_value)
 #define IS_TOKEN(n, t) ((n)->ast_token == token_t::t)
 #define IS_CLASS(n, c) ((n)->asc == Expr::c)
+#define IS_OPENTYPEEXPR(n) (((n)->asc == Expr::TypeExpr) && !AT_EXPR_TARGET(n))
+#define IS_FULLTYPEEXPR(n) (((n)->asc == Expr::TypeExpr) && AT_EXPR_TARGET(n))
 #define IS_OPENEXPR(n) (((n)->asc == Expr::OperExpr) && !AT_EXPR_TARGET(n))
 #define IS_FULLEXPR(n) (((n)->asc == Expr::OperExpr) && AT_EXPR_TARGET(n))
 #define IS2C(c1, c2) ((prev->asc == Expr::c1) && (head->asc == Expr::c2))
-#define IS3C(c1, c2, c3) (third && (third->asc == Expr::c1) && (prev->asc == Expr::c2) && (head->asc == Expr::c3))
 #define MAKE_NODE_FROM1(n, t, cl, s) n = std::make_unique<ASTNode>( \
 token_t::t, Expr::cl, LexTokenRange{s->block.tk_begin, s->block.tk_end, token_t::t});
 #define MAKE_NODE_N_FROM2(n, t, cl, num, s1, s2) n = std::make_unique<ASTNode>( \
@@ -711,6 +752,7 @@ struct ModuleContext {
 		return this->string_table.size() - 1; // newly inserted string
 	}
 };
+const auto string_table_empty_string = ""sv;
 
 bool convert_number(std::string_view raw_number, uint64_t &output) {
 	output = 0;
@@ -1042,6 +1084,9 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			return false;
 		}
 		return true;
+	case Expr::TypeDecl:
+		dbg << "Unhandled type " << expr;
+		return true;
 	case Expr::FuncDecl:
 	case Expr::RawOper:
 		show_syn_error("Expression", expr);
@@ -1102,6 +1147,15 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			if(func_save)
 				ctx->instructions.emplace_back(Instruction{Opcode::PopStack, 0});
 			dbg << "\n";
+			return true;
+		} else if(IS_TOKEN(expr, O_Dot)
+			&& expr->expressions.size() == 0
+			&& expr->meta_value == 0) {
+			dbg << "Load primary argument(s) operator" << '\n';
+			if(ctx->arg_declarations.empty()) {
+				ctx->arg_declarations.emplace_back(VariableDeclaration{0, 0, false});
+			}
+			ctx->instructions.emplace_back(Instruction{Opcode::LoadArg, 0, 0});
 			return true;
 		}
 		dbg << "operator: " << expr->ast_token;
@@ -1394,6 +1448,7 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 	auto dbg_file = std::fstream("./debug.txt", std::ios_base::out | std::ios_base::trunc);
 	auto &dbg = dbg_file;
 	std::shared_ptr<ModuleContext> root_module = std::make_shared<ModuleContext>();
+	root_module->find_or_put_string(string_table_empty_string);
 	LoadFileV(file_path, root_module->file_source);
 	token_t current_token = token_t::White;
 	const auto file_start = root_module->file_source.cbegin();
@@ -1413,474 +1468,573 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			root_node.get(), root_node->expressions
 		});
 	bool is_start_expr = false;
-	auto push_token = [&](LexTokenRange &lex_range) {
-		auto token_string = std::string_view(lex_range.tk_begin, lex_range.tk_end);
-		bool show = true;
-		auto collapse_expr = [&](bool terminating) {
-			auto &expr_list = current_block->expr_list;
-			std::vector<node_ptr> expr_hold;
-			// try to collapse the expression list
-			while(true) {
-				if(expr_list.size() < 2) break;
-				auto &head = expr_list.back();
-				auto &prev = *(expr_list.end() - 2);
-				//dbg << "|";
-				// dbg << "<|" << prev << "," << head << "|>";
-				node_ptr empty;
-				auto &third = expr_list.size() >= 3 ? *(expr_list.end() - 3) : empty;
-				auto &fourth = expr_list.size() >= 4 ? *(expr_list.end() - 4) : empty;
-				if(!head || !prev) return;
-				if((IS_CLASS(prev, Start) || IS_CLASS(prev, BlockExpr))
-					&& IS_CLASS(head, RawOper)
-				) {
-					// before: (value Start) (oper Raw)
-					//  after: (oper OperOpen (value Start))
-					head->asc = Expr::OperExpr;
-					PUSH_INTO(head, prev);
-					REMOVE1(prev);
-					dbg << "\n<RawOp>";
-				} else if(terminating &&
-					IS_CLASS(prev, FuncExpr) && !AT_EXPR_TARGET(prev)
-					&& (
-						IS_CLASS(head, BlockExpr)
-						|| IS_CLASS(head, Start)
-						|| IS_FULLEXPR(head)
-						|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
-						|| (IS_CLASS(head, KeywExpr) && AT_EXPR_TARGET(head)
-							&& (IS_TOKEN(head, K_If)
-								|| IS_TOKEN(head, K_While)
-								|| IS_TOKEN(head, K_Until)
-								|| IS_TOKEN(head, K_Loop)
-							))
-					)) {
-					dbg << "<FnPutEx>";
-					EXTEND_TO(prev, prev, head);
-					prev->newline = head->newline;
-					PUSH_INTO(prev, head);
-					REMOVE1(head);
-					continue;
-				} else if(third
-					&& IS_TOKEN(third, Ident)
-					&& IS_CLASS(head, FuncDecl)
-					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
-				) {
-					// check third for another ident or let
-					// TODO operator names
-					// TODO also need to check for newline
-					// named function with one arg or comma arg list
-					node_ptr comma_list;
-					if(IS_CLASS(prev, CommaList)) {
-						dbg << "\n<name func comma args>";
-						comma_list = std::move(prev);
-					} else {
-						dbg << "\n<name func one arg>";
-						MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
-						PUSH_INTO(comma_list, prev);
-					}
-					auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
-					bool is_obj = IS_TOKEN(current_block->block, Object);
-					if(!is_obj) {
-						auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
-						PUSH_INTO(let_assign, third);
-						third = std::move(let_expr);
-					}
-					prev = std::move(let_assign);
-					CONV_N(head, FuncExpr, 2);
-					PUSH_INTO(head, comma_list);
-					if(is_obj) {
-						REMOVE1(third);
-					}
-				} else if(third
-					&& (IS_TOKEN(third, K_Let) && AT_EXPR_TARGET(third) && IS_TOKEN(third->expressions.back(), Ident))
-					&& IS_CLASS(head, FuncDecl)
-					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
-				) {
-					// TODO check let is well formed
-					// let function with one argument or comma arg list
-					node_ptr comma_list;
-					if(IS_CLASS(prev, CommaList)) {
-						dbg << "\n<let func comma args>";
-						comma_list = std::move(prev);
-					} else {
-						dbg << "\n<let func one arg>";
-						MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
-						PUSH_INTO(comma_list, prev);
-					}
-					auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
-					PUSH_INTO(let_assign, third->expressions.back());
-					third->expressions.pop_back();
-					prev = std::move(let_assign);
-					CONV_N(head, FuncExpr, 2);
-					PUSH_INTO(head, comma_list);
-				} else if(
-					IS_CLASS(head, FuncDecl)
-					&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
-				) {
-					bool is_obj = IS_TOKEN(current_block->block, Object);
-					auto prev_ptr = prev.get();
-					auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, prev_ptr);
-					PUSH_INTO(let_assign, prev);
-					if(!is_obj) {
-						auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev_ptr);
-						prev = std::move(let_expr);
-					}
-					auto MAKE_NODE_FROM1(comma_list, Func, CommaList, head);
-					CONV_N(head, FuncExpr, 2);
-					PUSH_INTO(head, comma_list);
-					if(!is_obj) expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
-					else prev = std::move(let_assign);
-					// named function with no args or anon with comma arg list
-					dbg << "\n<func no args?>";
-				} else if(IS_CLASS(head, FuncDecl) && (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))) {
-					dbg << "\n<func no third>";
-					CONV_N(head, FuncExpr, 2);
-					PUSH_INTO(head, prev);
-					REMOVE1(prev);
-				} else if(IS2C(BlockExpr, FuncDecl)) {
-					// anon function with blocked arg list
-					// or named function with blocked arg list?
-					dbg << "\n<func block>";
-					CONV_N(head, FuncExpr, 2);
-					PUSH_INTO(head, prev);
-					REMOVE1(prev);
-				} else if(terminating &&
-					IS_CLASS(prev, KeywExpr)
-					&& (
-						IS_CLASS(head, Start)
-						|| IS_FULLEXPR(head)
-						|| IS_CLASS(head, BlockExpr)
-						|| (AT_EXPR_TARGET(head)
-							&& (IS_TOKEN(head, K_Break)
-								|| IS_TOKEN(head, K_Continue)
-								|| IS_TOKEN(head, K_If)
-								|| IS_TOKEN(head, K_Loop)
-								|| IS_TOKEN(head, K_While)
-								|| IS_TOKEN(head, K_Until)
-							)
-						))
-				) {
-					dbg << "<KeyEx>";
-					if(!AT_EXPR_TARGET(prev)) {
-						prev->newline = head->newline;
-						PUSH_INTO(prev, head);
-						REMOVE1(head);
-						continue;
-					} else {
-						dbg << "\n<unhandled KeywExpr *Expr>";
-					}
-				} else if((
-					IS_TOKEN(prev, Ident)
-					|| IS_TOKEN(prev, O_RefExpr)
-					|| IS_TOKEN(prev, O_Dot)
-					|| IS_TOKEN(prev, Block)
-					) && !prev->whitespace && !prev->newline && (
-						IS_TOKEN(head, Array)
-						|| IS_TOKEN(head, Block)
-						|| IS_TOKEN(head, Object)
-						)
-				) {
-					dbg << "<MakeRef>";
-					auto MAKE_NODE_N_FROM2(block_expr, O_RefExpr, OperExpr, 2, prev, head);
-					PUSH_INTO(block_expr, prev);
-					PUSH_INTO(block_expr, head);
-					REMOVE1(head);
-					expr_list.back() = std::move(block_expr);
-					continue;
-				} else if(IS_TOKEN(head, DotArray) && IS_CLASS(head, BlockExpr)) {
-					head->asc = Expr::Start;
-					dbg << "<DotArray>";
-					continue;
-				} else if(IS_TOKEN(prev, DotArray) && IS_CLASS(prev, BlockExpr)) {
-					prev->asc = Expr::Start;
-					dbg << "<DotArray>";
-					continue;
-				} else if(terminating
-					&& IS_OPENEXPR(prev) && IS_TOKEN(head, O_Dot)
-					&& head->expressions.size() == 0
-					&& head->meta_value > 0
+	node_ptr empty;
+	std::vector<node_ptr> expr_hold;
+	struct CollapseContext {
+		bool terminating;
+		bool error;
+	};
+	auto clean_list = [&]() {
+		auto &expr_list = current_block->expr_list;
+		for(size_t list_count = 0; list_count < expr_list.size() && list_count < 4;) {
+			auto item = expr_list.cend() - (1 + list_count);
+			if(!*item) {
+				expr_list.erase(item);
+				continue;
+			}
+			list_count++;
+		}
+	};
+	auto collapse_terminating3 = [&](CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_ptr &third) -> bool {
+		if(!third) return false;
+		if( IS_CLASS(third, CommaList) && IS_TOKEN(prev, Comma)
+			&& (IS_CLASS(head, Start)
+				|| IS_FULLEXPR(head)
+				|| IS_CLASS(head, BlockExpr)
+			)
+		) {
+			EXTEND_TO(third, third, head);
+			PUSH_INTO(third, head);
+		} else if(
+			(IS_CLASS(third, Start)
+				|| IS_FULLEXPR(third)
+				|| IS_CLASS(third, BlockExpr)
+				)
+			&& IS_TOKEN(prev, Comma)
+			&& (IS_CLASS(head, Start)
+				|| IS_FULLEXPR(head)
+				|| IS_CLASS(head, BlockExpr)
+			)
+		) {
+			CONV(prev, CommaList);
+			EXTEND_TO(prev, third, head);
+			PUSH_INTO(prev, third);
+			PUSH_INTO(prev, head);
+		} else return false;
+		return true;
+	};
+	auto collapse_terminating2 = [&](CollapseContext &ctx, node_ptr &head, node_ptr &prev) -> bool {
+		auto &expr_list = current_block->expr_list;
+		if(
+			!AT_EXPR_TARGET(prev)
+			&& (IS_CLASS(prev, TypeExpr)
+				|| IS_CLASS(prev, TypeDecl)
+				)
+			&& (IS_CLASS(head, TypeStart)
+				|| IS_FULLTYPEEXPR(head)
+				)
+		) {
+			dbg << "<TypeCol>";
+			PUSH_INTO(prev, head);
+		} else if(IS_CLASS(prev, FuncExpr) && !AT_EXPR_TARGET(prev)
+			&& (
+				IS_CLASS(head, BlockExpr)
+				|| IS_CLASS(head, Start)
+				|| IS_FULLEXPR(head)
+				|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
+				|| (IS_CLASS(head, KeywExpr) && AT_EXPR_TARGET(head)
+					&& (IS_TOKEN(head, K_If)
+						|| IS_TOKEN(head, K_While)
+						|| IS_TOKEN(head, K_Until)
+						|| IS_TOKEN(head, K_Loop)
+			)))
+		) {
+			dbg << "<FnPutEx>";
+			EXTEND_TO(prev, prev, head);
+			PUSH_INTO(prev, head);
+		} else if(
+			IS_CLASS(prev, KeywExpr)
+			&& (IS_CLASS(head, Start)
+				|| IS_FULLEXPR(head)
+				|| IS_CLASS(head, BlockExpr)
+				|| (AT_EXPR_TARGET(head)
+					&& (IS_TOKEN(head, K_Break)
+						|| IS_TOKEN(head, K_Continue)
+						|| IS_TOKEN(head, K_If)
+						|| IS_TOKEN(head, K_Loop)
+						|| IS_TOKEN(head, K_While)
+						|| IS_TOKEN(head, K_Until)
+			)))
+		) {
+			dbg << "<KeyEx>";
+			if(!AT_EXPR_TARGET(prev)) {
+				prev->newline = head->newline;
+				PUSH_INTO(prev, head);
+			} else {
+				dbg << "\n<unhandled KeywExpr *Expr>";
+				return false;
+			}
+		} else if(
+			IS_OPENEXPR(prev) && IS_TOKEN(head, O_Dot)
+			&& head->expressions.size() == 0
+			&& head->meta_value > 0
+		) {
+			head->meta_value = 0;
+		} else if(
+			IS_OPENEXPR(prev)
+			&& (IS_CLASS(head, Start)
+				|| IS_CLASS(head, BlockExpr)
+				|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
+		)) {
+			// before: (oper OperExpr (value Start)) (value Start)
+			//  after: (oper OperExpr (value Start) (value Start))
+			dbg << "<OpPut>";
+			prev->newline = head->newline;
+			PUSH_INTO(prev, head);
+		} else if(
+			IS_CLASS(prev, RawOper)
+			&& (IS_TOKEN(prev, O_Sub)
+				|| (IS_TOKEN(prev, O_Dot)
+					&& !prev->whitespace && !prev->newline)
+				)
+			&& (IS_CLASS(head, Start) ||
+				IS_FULLEXPR(head) ||
+				IS_CLASS(head, BlockExpr)
+				)
+		) {
+			if(IS_TOKEN(prev, O_Sub))
+				CONV_TK(prev, O_Minus);
+			CONV_N(prev, OperExpr, 1);
+		} else if(IS_OPENEXPR(prev) && IS_FULLEXPR(head)) {
+			// collapse the tree one level
+			dbg << "<OPCol>";
+			if(head->precedence <= prev->precedence) {
+				// pop the prev item and put into the head item LHS
+				//dbg << "<LEP\nL:" << prev << "\nR:" << head << "\n>";
+				// ex1front push_into ex2
+				// ex2 insert_into ex1front
+				auto decend_item = &head;
+				while(IS_CLASS(*decend_item, OperExpr) && (*decend_item)->precedence <= prev->precedence) {
+					dbg << "<LED>";
+					decend_item = &(*decend_item)->expressions.front();
+				}
+				PUSH_INTO(prev, *decend_item);
+				prev.swap(*decend_item);
+			} else {
+				//dbg << "<GP\nL:" << *prev << "\nR:" << *head << "\n>";
+				PUSH_INTO(prev, head);
+			}
+		} else if(
+			(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut))
+			&& !AT_EXPR_TARGET(prev)
+			&& (IS_TOKEN(head, Ident) || IS_CLASS(head, CommaList))
+		) {
+			PUSH_INTO(prev, head);
+		} else if(IS2C(KeywExpr, KeywExpr)) {
+			if(
+				IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
+				&& !IS_TOKEN(prev->expressions.back(), K_Else)
+				&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
+				&& AT_EXPR_TARGET(head)
+			) {
+				PUSH_INTO(prev, head);
+			} else if(
+				IS_TOKEN(prev, K_Let) && !AT_EXPR_TARGET(prev)
+				&& IS_TOKEN(head, K_Mut) && AT_EXPR_TARGET(head)
+			) {
+				PUSH_INTO(prev, head);
+			} else if(
+				IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
+				&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
+				&& !AT_EXPR_TARGET(head)
+			) {
+				dbg << "\n<if/else syntax error>";
+				return false;
+			} else {
+				dbg << "\n<unhandled Key Key\nL:" << prev << "\nR:" << head << ">";
+				return false;
+			}
+		} else {
+			return false;
+		}
+		return true;
+	};
+	auto collapse_non_terminating4 = [&](CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_ptr &third, node_ptr &fourth) {
+		if(!third || !fourth) return false;
+		if((IS_CLASS(prev, Start) || IS_FULLEXPR(prev))
+			&& IS_TOKEN(head, Comma)
+			&& IS_CLASS(third, Delimiter) && IS_TOKEN(third, Comma)
+			&& IS_CLASS(fourth, CommaList)
+		) {
+			// take prev, leave head
+			EXTEND_TO(fourth, fourth, head);
+			PUSH_INTO(fourth, prev);
+		} else return false;
+		return true;
+	};
+	auto collapse_non_terminating3 = [&](CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_ptr &third) {
+		if(!third) return false;
+		if(
+			IS_TOKEN(third, Ident)
+			&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+			&& IS_CLASS(head, FuncDecl)
+		) {
+			// check third for another ident or let
+			// TODO operator names
+			// TODO also need to check for newline
+			// named function with one arg or comma arg list
+			node_ptr comma_list;
+			if(IS_CLASS(prev, CommaList)) {
+				dbg << "\n<name func comma args>";
+				comma_list = std::move(prev);
+			} else {
+				dbg << "\n<name func one arg>";
+				MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
+				PUSH_INTO(comma_list, prev);
+			}
+			auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
+			bool is_obj = IS_TOKEN(current_block->block, Object);
+			if(!is_obj) {
+				auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
+				PUSH_INTO(let_assign, third);
+				third = std::move(let_expr);
+			}
+			prev = std::move(let_assign);
+			CONV_N(head, FuncExpr, 2);
+			PUSH_INTO(head, comma_list);
+		} else if(
+			(IS_TOKEN(third, K_Let) && AT_EXPR_TARGET(third)
+			&& IS_TOKEN(third->expressions.back(), Ident))
+			&& (IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+			&& IS_CLASS(head, FuncDecl)
+		) {
+			// TODO check let is well formed
+			// let function with one argument or comma arg list
+			node_ptr comma_list;
+			if(IS_CLASS(prev, CommaList)) {
+				dbg << "\n<let func comma args>";
+				comma_list = std::move(prev);
+			} else {
+				dbg << "\n<let func one arg>";
+				MAKE_NODE_FROM1(comma_list, Comma, CommaList, prev);
+				PUSH_INTO(comma_list, prev);
+			}
+			auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
+			PUSH_INTO(let_assign, POP_EXPR(third));
+			prev = std::move(let_assign);
+			CONV_N(head, FuncExpr, 2);
+			PUSH_INTO(head, comma_list);
+		} else if(IS2C(KeywExpr, KeywExpr)) {
+			if(IS_TOKEN(third, K_If) && AT_EXPR_TARGET(third)
+				&& IS_TOKEN(prev, K_ElseIf) && AT_EXPR_TARGET(prev)
+			) {
+				PUSH_INTO(third, prev);
+				return true;
+			} else {
+				dbg << "\n<unhandled" << ctx.terminating << " Key Key\nT:"
+					<< third->ast_token << " " << third->asc
+					<< "\nL:" << prev
+					<< "\nR:" << head << ">";
+				ctx.error = true;
+				return true;
+			}
+		} else if(
+			IS_CLASS(third, KeywExpr) && !AT_EXPR_TARGET(third)
+			&& (IS_CLASS(prev, Start)
+				|| IS_CLASS(prev, BlockExpr)
+				|| (IS_CLASS(prev, FuncExpr) && AT_EXPR_TARGET(prev))
+				|| IS_FULLEXPR(prev)
+				|| (IS_CLASS(prev, KeywExpr) && AT_EXPR_TARGET(prev)
+					&& (IS_TOKEN(prev, K_If)
+						|| IS_TOKEN(prev, K_While)
+						|| IS_TOKEN(prev, K_Until)
+						|| IS_TOKEN(prev, K_Loop)
+					))
+			) && (IS_CLASS(head, Start)
+				|| IS_CLASS(head, TypeDecl)
+				|| IS_CLASS(head, KeywExpr)
+				|| IS_CLASS(head, BlockExpr)
+				|| IS_FULLEXPR(head))
+		) {
+			// ex2 push_info ex3
+			PUSH_INTO(third, prev);
+			return true;
+		} else return false;
+		return true;
+	};
+	auto collapse_non_terminating2 = [&](CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
+		auto &expr_list = current_block->expr_list;
+		if(
+			IS_CLASS(prev, TypeDecl)
+			&& prev->expressions.size() == 0
+			&& IS_TOKEN(head, Ident)
+		) {
+			PUSH_INTO(prev, head);
+			dbg << "\n<TypeSet>";
+		} else if(
+			IS_CLASS(prev, TypeDecl)
+			&& prev->expressions.size() == 1
+			&& IS_CLASS(head, BlockExpr)
+		) {
+			if(IS_TOKEN(head, Object)) CONV_TK(head, TypeObject);
+			else if(IS_TOKEN(head, Array)) CONV_TK(head, TypeArray);
+			else if(IS_TOKEN(head, Block)) CONV_TK(head, TypeBlock);
+			CONV(head, TypeExpr);
+			PUSH_INTO(prev, head);
+			dbg << "\n<TypeBlock>";
+		} else if(
+			(IS_CLASS(prev, TypeExpr) || IS_CLASS(prev, TypeDecl))
+			&& !AT_EXPR_TARGET(prev)
+			&& IS_CLASS(head, Start)) {
+			CONV(head, TypeStart);
+		} else if(IS_FULLTYPEEXPR(prev) && IS_CLASS(head, RawOper)) {
+			CONV(head, TypeExpr);
+			PUSH_INTO(head, prev);
+			dbg << "\n<TypeOp>";
+		} else if(IS_CLASS(prev, TypeStart) && IS_CLASS(head, RawOper)) {
+			CONV(head, TypeExpr);
+			PUSH_INTO(head, prev);
+			dbg << "\n<TypeOp>";
+		} else if((IS_CLASS(prev, Start) || IS_CLASS(prev, BlockExpr))
+			&& IS_CLASS(head, RawOper)
+		) {
+			CONV(head, OperExpr);
+			PUSH_INTO(head, prev);
+			dbg << "\n<RawOp>";
+		} else if(
+			(IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+			&& IS_CLASS(head, FuncDecl)
+		) {
+			bool is_obj = IS_TOKEN(current_block->block, Object);
+			auto prev_ptr = prev.get();
+			auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, prev_ptr);
+			PUSH_INTO(let_assign, prev);
+			if(!is_obj) {
+				auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev_ptr);
+				prev = std::move(let_expr);
+			}
+			auto MAKE_NODE_FROM1(comma_list, Func, CommaList, head);
+			CONV_N(head, FuncExpr, 2);
+			PUSH_INTO(head, comma_list);
+			if(!is_obj) expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
+			else prev = std::move(let_assign);
+			// named function with no args or anon with comma arg list
+			dbg << "\n<func no args?>";
+		} else if(
+			(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut))
+			&& AT_EXPR_TARGET(prev)
+			&& IS_CLASS(head, FuncDecl)
+		) {
+			CONV_N(head, FuncExpr, 2);
+			auto MAKE_NODE_N_FROM2(let_assign, O_Assign, OperExpr, 2, prev, head);
+			PUSH_INTO(let_assign, POP_EXPR(prev));
+			auto MAKE_NODE_FROM1(comma_list, Func, CommaList, head);
+			PUSH_INTO(head, comma_list);
+			expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
+			dbg << "\n<LetFn>";
+		} else if(
+			(IS_TOKEN(prev, Ident) || IS_CLASS(prev, CommaList))
+			&& IS_CLASS(head, FuncDecl)
+		) {
+			dbg << "\n<func no third>";
+			CONV_N(head, FuncExpr, 2);
+			PUSH_INTO(head, prev);
+		} else if(IS2C(BlockExpr, FuncDecl)) {
+			// anon function with blocked arg list
+			// or named function with blocked arg list?
+			dbg << "\n<func block>";
+			CONV_N(head, FuncExpr, 2);
+			PUSH_INTO(head, prev);
+		} else if(
+				((IS_TOKEN(prev, Ident) && IS_CLASS(prev, Start))
+				|| IS_TOKEN(prev, O_RefExpr)
+				|| IS_TOKEN(prev, O_Dot)
+				|| (IS_TOKEN(prev, Block) && IS_CLASS(prev, BlockExpr))
+				)
+			&& !prev->whitespace && !prev->newline
+			&& (IS_TOKEN(head, Array)
+				|| IS_TOKEN(head, Block)
+				|| IS_TOKEN(head, Object)
+				)
+		) {
+			dbg << "<MakeRef>";
+			auto MAKE_NODE_N_FROM2(block_expr, O_RefExpr, OperExpr, 2, prev, head);
+			PUSH_INTO(block_expr, prev);
+			PUSH_INTO(block_expr, head);
+			prev = std::move(block_expr);
+			return true;
+		} else if(!ctx.terminating
+			&& IS_CLASS(prev, OperExpr) && IS_TOKEN(prev, O_Dot)
+			&& prev->meta_value == 1 && prev->expressions.size() == 0
+			&& (prev->newline || prev->whitespace)
+			&& (IS_CLASS(head, Start)
+				|| IS_CLASS(head, BlockExpr)
+				|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
+		)) {
+			dbg << "<DotNLCv>";
+			prev->meta_value = 0;
+			expr_hold.emplace_back(std::move(head));
+			ctx.terminating = true;
+			return true;
+		} else if(IS_FULLEXPR(prev) && IS_CLASS(head, RawOper)) {
+			dbg << "<OpRaw>";
+			// before: (oper1 OperExpr (value1 Start) (value2 Start)) (oper2 Raw)
+			if(head->precedence <= prev->precedence) {
+				// new is same precedence: (1+2)+ => ((1+2)+_)
+				// new is lower precedence: (1*2)+ => ((1*2)+_)
+				//  after: (oper2 OperOpen
+				//             oper1 OperExpr (value1 Start) (value2 Start) )
+				// put oper1 inside oper2
+				//  ex2 push_into ex1
+				CONV(head, OperExpr);
+				PUSH_INTO(head, prev);
+			} else {
+				// new is higher precedence: (1+2)* => (1+(2*_)) || (1+_) (2*_)
+				//  after: (oper1 OperOpen (value1 Start)) (oper2 OperOpen (value2 Start))
+				// convert both operators to open expressions
+				// ex2back push_into ex1
+				CONV(head, OperExpr);
+				// pop value2 from oper1 push into oper2
+				PUSH_INTO(head, POP_EXPR(prev));
+				// TODO have to decend or collapse the tree at some point
+			}
+		} else if(IS2C(KeywExpr, KeywExpr)) {
+			if(
+				IS_TOKEN(prev, K_Else) && prev->expressions.empty()
+				&& IS_TOKEN(head, K_If)
+			) {
+				CONV_TK(head, K_ElseIf);
+				EXTEND_TO(head, prev, head);
+				return true;
+			} else if(
+				IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
+				&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
+				&& !AT_EXPR_TARGET(head)
+			) {
+				if(ctx.terminating) {
+					dbg << "\n<if/else syntax error>";
+					ctx.error = true;
+				}
+			} else {
+				dbg << "\n<unhandled KeywExpr KeywExpr\nL:" << prev << "\nR:" << head << ">";
+				ctx.error = true;
+			}
+		} else if(
+			(IS_CLASS(prev, Start)
+				|| IS_CLASS(prev, BlockExpr)
+				|| (IS_CLASS(prev, FuncExpr) && AT_EXPR_TARGET(prev))
+				|| IS_FULLEXPR(prev)
+				|| (IS_CLASS(prev, KeywExpr) && AT_EXPR_TARGET(prev)
+					&& (IS_TOKEN(prev, K_If)
+						|| IS_TOKEN(prev, K_While)
+						|| IS_TOKEN(prev, K_Until)
+						|| IS_TOKEN(prev, K_Loop)
+					))
+			) && (IS_CLASS(head, Start)
+				|| IS_CLASS(head, TypeExpr)
+				|| IS_CLASS(head, KeywExpr)
+				|| IS_CLASS(head, BlockExpr)
+				|| IS_FULLEXPR(head))
+			) {
+			dbg << "<LAH>";
+			if(!ctx.terminating) {
+				//dbg << "\n<collapse_expr before " << head << ">";
+				ctx.terminating = true;
+				expr_hold.emplace_back(std::move(expr_list.back()));
+				return true;
+			}
+			dbg << "\n<unhandled lookahead>" << prev->asc << "\nR:" << head->asc << '\n';
+		} else if(!ctx.terminating && IS_TOKEN(head, Semi)) {
+			dbg << "\n<collapse_expr semi>";
+			ctx.terminating = true;
+			expr_hold.emplace_back(std::move(expr_list.back()));
+			return true;
+		} else if(
+				(IS_OPENEXPR(prev)
+				|| IS_CLASS(prev, Delimiter)
+				|| IS_CLASS(prev, KeywExpr)
+				)
+			&& IS_CLASS(head, RawOper)
+			&& (IS_TOKEN(head, O_Sub) || IS_TOKEN(head, O_Dot))
+		) {
+			if(IS_TOKEN(head, O_Sub))
+				CONV_TK(head, O_Minus);
+			CONV_N(head, OperExpr, 1);
+			return true;
+		} else if(IS_CLASS(prev, End)) {
+			dbg << "<End>";
+			// no op
+		} else if(IS2C(CommaList, Delimiter)) {
+		} else if(
+			(IS_CLASS(prev, Start) || IS_FULLEXPR(prev))
+			&& IS_TOKEN(head, Comma)
+		) {
+			auto MAKE_NODE_N_FROM2(comma_list, Comma, CommaList, 0, prev, head);
+			PUSH_INTO(comma_list, prev);
+			prev.swap(comma_list); // comma_list -> prev
+		} else if(IS_OPENEXPR(prev) && (
+			IS_CLASS(head, Start) || IS_FULLEXPR(head) )) {
+			dbg << "<NOPS>";
+		} else if(IS2C(Delimiter, Start)) {
+			if(ctx.terminating) {
+				dbg << "<TODO Delimiter>";
+				ctx.error = true;
+			} else dbg << "<NOP>";
+		} else {
+			dbg << "\n<<collapse_expr " << ctx.terminating << " unhandled " << prev << ":" << head << ">>";
+			ctx.error = true;
+		}
+		return false;
+	};
+	auto collapse_expr = [&](bool terminating) {
+		auto &expr_list = current_block->expr_list;
+		// try to collapse the expression list
+		CollapseContext ctx { terminating, false };
+		while(true) {
+			if(expr_list.empty()) break;
+			auto &head = expr_list.back();
+			if(expr_list.size() == 1) {
+				if( ctx.terminating
+					&& IS_CLASS(head, RawOper) && IS_TOKEN(head, O_Dot)) {
+					CONV_N(head, OperExpr, 0);
+				} else if( ctx.terminating
+					&& IS_OPENEXPR(head) && IS_TOKEN(head, O_Dot)
+					&& head->meta_value == 1
 				) {
 					head->meta_value = 0;
 					continue;
-				} else if(!terminating
-					&& IS_CLASS(prev, OperExpr)
-					&& IS_TOKEN(prev, O_Dot)
-					&& prev->meta_value == 1
-					&& prev->expressions.size() == 0
-					&& (prev->newline || prev->whitespace)
-					&& (
-					IS_CLASS(head, Start)
-					|| IS_CLASS(head, BlockExpr)
-					|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
-				)) {
-					dbg << "<DotNLCv>";
-					prev->meta_value = 0;
-					expr_hold.emplace_back(std::move(head));
-					REMOVE1(head);
-					terminating = true;
-					continue;
-				} else if(terminating && IS_OPENEXPR(prev) && (
-					IS_CLASS(head, Start)
-					|| IS_CLASS(head, BlockExpr)
-					|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
-				)) {
-					// before: (oper OperOpen (value Start)) (value Start)
-					//  after: (oper OperExpr (value Start) (value Start))
-					dbg << "<OpPut>";
-					prev->asc = Expr::OperExpr;
-					prev->newline = head->newline;
-					PUSH_INTO(prev, head);
-					REMOVE1(head);
-					continue;
-				} else if(IS_FULLEXPR(prev) && IS_CLASS(head, RawOper)) {
-					dbg << "<OpRaw>";
-					// before: (oper1 OperExpr (value1 Start) (value2 Start)) (oper2 Raw)
-					if(head->precedence <= prev->precedence) {
-						// new is same precedence: (1+2)+ => ((1+2)+_)
-						// new is lower precedence: (1*2)+ => ((1*2)+_)
-						//  after: (oper2 OperOpen
-						//             oper1 OperExpr (value1 Start) (value2 Start) )
-						// put oper1 inside oper2
-						//  ex2 push_into ex1
-						head->asc = Expr::OperExpr;
-						PUSH_INTO(head, prev);
-						REMOVE1(prev);
-					} else {
-						// new is higher precedence: (1+2)* => (1+(2*_)) || (1+_) (2*_)
-						//  after: (oper1 OperOpen (value1 Start)) (oper2 OperOpen (value2 Start))
-						// convert both operators to open expressions
-						// ex2back push_into ex1
-						prev->asc = Expr::OperExpr;
-						head->asc = Expr::OperExpr;
-						// pop value2 from oper1 push into oper2
-						PUSH_INTO(head, prev->expressions.back());
-						prev->expressions.pop_back();
-						// TODO have to decend or collapse the tree at some point
-					}
-				} else if(IS2C(KeywExpr, KeywExpr)) {
-					if(IS_TOKEN(head, K_If)
-						&& IS_TOKEN(prev, K_Else)
-						&& prev->expressions.empty()
-					) {
-						head->ast_token = token_t::K_ElseIf;
-						EXTEND_TO(head, prev, head);
-						REMOVE1(prev);
-						continue;
-					} else if(
-						terminating
-						&& IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
-						&& !IS_TOKEN(prev->expressions.back(), K_Else)
-						&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
-						&& AT_EXPR_TARGET(head)
-					) {
-						PUSH_INTO(prev, head);
-						REMOVE1(head);
-						continue;
-					} else if(terminating &&
-						IS_TOKEN(prev, K_Let) && !AT_EXPR_TARGET(prev)
-						&& IS_TOKEN(head, K_Mut) && AT_EXPR_TARGET(head)
-					) {
-						PUSH_INTO(prev, head);
-						REMOVE1(head);
-						continue;
-					} else if(
-						IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
-						&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
-						&& !AT_EXPR_TARGET(head)
-					) {
-						if(terminating) {
-							dbg << "\n<if/else syntax error>";
-						}
-					} else if(third) {
-						if(
-							IS_TOKEN(third, K_If) && AT_EXPR_TARGET(third)
-							&& IS_TOKEN(prev, K_ElseIf) && AT_EXPR_TARGET(prev)
-						) {
-							PUSH_INTO(third, prev);
-							REMOVE1(prev);
-						} else {
-							dbg << "\n<unhandled" << terminating << " Key Key\nT:"
-								<< third->ast_token << " " << third->asc
-								<< "\nL:" << prev
-								<< "\nR:" << head << ">";
-						}
-					} else {
-						dbg << "\n<unhandled KeywExpr KeywExpr\nL:" << prev << "\nR:" << head << ">";
-					}
-				} else if(
-					(IS_CLASS(prev, Start)
-						|| IS_CLASS(prev, BlockExpr)
-						|| (IS_CLASS(prev, FuncExpr) && AT_EXPR_TARGET(prev))
-						|| IS_FULLEXPR(prev)
-						|| (IS_CLASS(prev, KeywExpr) && AT_EXPR_TARGET(prev)
-							&& (IS_TOKEN(prev, K_If)
-								|| IS_TOKEN(prev, K_While)
-								|| IS_TOKEN(prev, K_Until)
-								|| IS_TOKEN(prev, K_Loop)
-							))
-					) && (IS_CLASS(head, Start)
-						|| IS_CLASS(head, KeywExpr)
-						|| IS_CLASS(head, BlockExpr)
-						|| IS_FULLEXPR(head))
-					) {
-					dbg << "<LAH>";
-					if(third) {
-						if(IS_CLASS(third, KeywExpr) && !AT_EXPR_TARGET(third)) {
-							// ex2 push_info ex3
-							PUSH_INTO(third, prev);
-							REMOVE1(prev);
-							continue;
-						}
-					}
-					if(!terminating) {
-						//dbg << "\n<collapse_expr before " << head << ">";
-						terminating = true;
-						expr_hold.emplace_back(std::move(expr_list.back()));
-						REMOVE1(head);
-						continue;
-					}
-					dbg << "\n<unhandled lookahead>" << prev << "\nR:" << head << '\n';
-				} else if(!terminating && IS_TOKEN(head, Semi)) {
-					dbg << "\n<collapse_expr semi>";
-					terminating = true;
-					expr_hold.emplace_back(std::move(expr_list.back()));
-					REMOVE1(head);
-					continue;
-				} else if(terminating && IS_CLASS(prev, RawOper)
-					&& (IS_TOKEN(prev, O_Sub)
-						|| (IS_TOKEN(prev, O_Dot)
-							&& !prev->whitespace && !prev->newline)
-					) && (
-						IS_CLASS(head, Start) ||
-						IS_FULLEXPR(head) ||
-						IS_CLASS(head, BlockExpr)
-					)) {
-					if(IS_TOKEN(prev, O_Sub))
-						prev->ast_token = token_t::O_Minus;
-					prev->asc = Expr::OperExpr;
-					prev->meta_value = 1;
-					prev->precedence = get_precedence(prev->ast_token);
-					continue;
-				} else if((
-					IS_OPENEXPR(prev)
-					|| IS_CLASS(prev, Delimiter)
-					|| IS_CLASS(prev, KeywExpr)
-					)
-					&& IS_CLASS(head, RawOper)
-				) {
-					if(IS_TOKEN(head, O_Sub) || IS_TOKEN(head, O_Dot)) {
-						if(IS_TOKEN(head, O_Sub))
-							head->ast_token = token_t::O_Minus;
-						head->asc = Expr::OperExpr;
-						head->meta_value = 1;
-						head->precedence = get_precedence(head->ast_token);
-						continue;
-					}
-				} else if(terminating && 
-					IS_OPENEXPR(prev) && IS_FULLEXPR(head)
-				) {
-					// collapse the tree one level
-					dbg << "<OPCol>";
-
-					if(head->precedence <= prev->precedence) {
-						// pop the prev item and put into the head item LHS
-						//dbg << "<LEP\nL:" << prev << "\nR:" << head << "\n>";
-						// ex1front push_into ex2
-						// ex2 insert_into ex1front
-						prev->asc = Expr::OperExpr;
-						auto decend_item = &head;
-						while(IS_CLASS(*decend_item, OperExpr) && (*decend_item)->precedence <= prev->precedence) {
-							dbg << "<LED>";
-							decend_item = &(*decend_item)->expressions.front();
-						}
-						PUSH_INTO(prev, *decend_item);
-						prev.swap(*decend_item);
-						REMOVE1(prev);
-						continue; // re-eval the top of stack
-					} else {
-						//dbg << "<GP\nL:" << *prev << "\nR:" << *head << "\n>";
-						prev->asc = Expr::OperExpr;
-						PUSH_INTO(prev, head);
-						REMOVE1(head);
-						continue; // re-eval the top of stack
-					}
-				} else if(IS_CLASS(prev, End)) {
-					dbg << "<End>";
-					// no op
-				} else if(IS2C(CommaList, Delimiter)) {
-				} else if((
-					IS_CLASS(prev, Start) || IS_FULLEXPR(prev)
-					) && IS_TOKEN(head, Comma)) {
-					if(third && IS_CLASS(third, Delimiter) && IS_TOKEN(third, Comma)
-						&& fourth && IS_CLASS(fourth, CommaList)) {
-						// take prev, leave head
-						EXTEND_TO(fourth, fourth, head);
-						PUSH_INTO(fourth, prev);
-						expr_list.erase(expr_list.cend() - 3, expr_list.cend() - 1);
-					} else {
-						auto MAKE_NODE_N_FROM2(comma_list, Comma, CommaList, 0, prev, head);
-						PUSH_INTO(comma_list, prev);
-						prev.swap(comma_list); // comma_list -> prev
-					}
-				} else if(terminating &&
-					(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut))
-					&& !AT_EXPR_TARGET(prev)
-					&& (IS_TOKEN(head, Ident) || IS_CLASS(head, CommaList))
-				) {
-					PUSH_INTO(prev, head);
-					REMOVE1(head);
-					continue;
-				} else if(terminating && IS_TOKEN(prev, Comma) && 
-					(IS_CLASS(head, Start)
-					|| IS_FULLEXPR(head)
-					|| IS_CLASS(head, BlockExpr)
-					)
-				) {
-					if(third && IS_CLASS(third, CommaList)) {
-						EXTEND_TO(third, third, head);
-						third->newline = head->newline;
-						PUSH_INTO(third, head);
-						expr_list.erase(expr_list.cend() - 2, expr_list.cend());
-						continue;
-					} else if(third && (
-						IS_CLASS(third, Start)
-						|| IS_FULLEXPR(third)
-						|| IS_CLASS(third, BlockExpr)
-						)) {
-						prev->asc = Expr::CommaList;
-						EXTEND_TO(prev, third, head);
-						prev->newline = head->newline;
-						PUSH_INTO(prev, third);
-						PUSH_INTO(prev, head);
-						REMOVE1(head); // "head"
-						REMOVE1(prev); // "third" after head removed
-						continue;
-					} else {
-						dbg << "<ERROR Comma!?>";
-					}
-				} else if(IS_OPENEXPR(prev) && (
-					IS_CLASS(head, Start) || IS_FULLEXPR(head) )) {
-					dbg << "<NOPS>";
-				} else if(IS2C(Delimiter, Start)) {
-					if(terminating) {
-						dbg << "<TODO Delimiter>";
-					} else dbg << "<NOP>";
-				} else {
-					dbg << "\n<<collapse_expr " << terminating << " unhandled " << prev << ":" << head << ">>";
+				} else if(IS_CLASS(head, RawOper) && IS_TOKEN(head, O_Dot)) {
+					CONV_N(head, OperExpr, 1);
 				}
 				break;
 			}
-			while(expr_hold.size() > 0) {
-				//dbg << "\n<END collapse_expr before " << expr_hold << ">";
-				expr_list.emplace_back(std::move(expr_hold.back()));
-				expr_hold.pop_back();
-			}
-		};
-		auto start_expr = [&](std::unique_ptr<ASTNode> new_node) {
-			// push any existing start_expression
-			auto &expr_list = current_block->expr_list;
-			expr_list.emplace_back(std::move(new_node));
-			collapse_expr(false);
-		};
+			auto &prev = *(expr_list.end() - 2);
+			if(!head || !prev) return;
+			auto &third = expr_list.size() >= 3 ? *(expr_list.end() - 3) : empty;
+			auto &fourth = expr_list.size() >= 4 ? *(expr_list.end() - 4) : empty;
+			//dbg << "|";
+			//dbg << "<|" << prev << "," << head << "|>";
+			bool was_terminating = ctx.terminating;
+			if(!(
+				(ctx.terminating && (
+					collapse_terminating3(ctx, head, prev, third)
+					|| collapse_terminating2(ctx, head, prev)
+				))
+				|| collapse_non_terminating4(ctx, head, prev, third, fourth)
+				|| collapse_non_terminating3(ctx, head, prev, third)
+				|| collapse_non_terminating2(ctx, head, prev)
+			)) {
+				clean_list();
+				if(was_terminating || !ctx.terminating || ctx.error)
+					break;
+			} else clean_list();
+			if(ctx.error) break;
+		}
+		while(expr_hold.size() > 0) {
+			//dbg << "\n<END collapse_expr before " << expr_hold << ">";
+			expr_list.emplace_back(std::move(expr_hold.back()));
+			expr_hold.pop_back();
+		}
+	};
+	auto start_expr = [&](std::unique_ptr<ASTNode> new_node) {
+		// push any existing start_expression
+		auto &expr_list = current_block->expr_list;
+		expr_list.emplace_back(std::move(new_node));
+		collapse_expr(false);
+	};
+	auto push_token = [&](LexTokenRange &lex_range) {
+		auto token_string = std::string_view(lex_range.tk_begin, lex_range.tk_end);
+		bool show = true;
 		auto terminal_expr = [&]() {
 			dbg << "\n<TE " << lex_range.token << " " << token_string << ">";
 			collapse_expr(true);
@@ -1894,8 +2048,7 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 		case token_t::DotObject: {
 			auto block = std::make_unique<ASTNode>(lex_range.token, Expr::BlockExpr, lex_range);
 			auto ptr_block = block.get();
-			current_block->expr_list.emplace_back(std::move(block));
-			collapse_expr(false);
+			start_expr(std::move(block));
 			block_stack.emplace_back(std::move(current_block));
 			current_block = std::make_unique<ExprStackItem>(ExprStackItem{ptr_block, ptr_block->expressions});
 			current_block->obj_ident = lex_range.token == token_t::Object;
@@ -1911,10 +2064,13 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			//expr_list.clear(); // TODO use these
 			switch(current_block->block->ast_token) {
 			case token_t::Block:
+			case token_t::TypeBlock:
 			case token_t::DotBlock: block_char = ')'; break;
 			case token_t::Array:
+			case token_t::TypeArray:
 			case token_t::DotArray: block_char = ']'; break;
 			case token_t::Object:
+			case token_t::TypeObject:
 			case token_t::DotObject: block_char = '}'; break;
 			default: break;
 			}
@@ -1955,40 +2111,13 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 			auto found = std::ranges::find(keyword_table_span, token_string, &ParserKeyword::word);
 			if(found != keyword_table_span.end()) {
 				lex_range.token = found->token;
-				switch(lex_range.token) {
-				case token_t::K_If:
-				case token_t::K_ElseIf:
-				case token_t::K_While:
-				case token_t::K_Until:
-					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::KeywExpr, 2, lex_range));
-					break;
-				case token_t::K_Loop:
-				case token_t::K_Break:
-				case token_t::K_End:
-				case token_t::K_Else:
-				case token_t::K_Let:
-				case token_t::K_Mut:
-					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::KeywExpr, 1, lex_range));
-					break;
-				case token_t::K_Continue:
-					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::KeywExpr, 0, lex_range));
-					break;
-				case token_t::K_For:
-				case token_t::K_In:
-				case token_t::K_Import:
-				case token_t::K_Export:
-				case token_t::K_Goto:
-					// TODO all of these are
-					break;
-				case token_t::K_True:
-				case token_t::K_False:
-					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::Start, lex_range));
-					break;
-				default:
-					dbg << "Error token\n";
-					break;
+				if(found->action == KWA::Terminate) {
+					terminal_expr();
 				}
+				start_expr(std::make_unique<ASTNode>(
+					lex_range.token, found->parse_class, found->meta_value, lex_range));
 			} else {
+				dbg << "Error token\n";
 				// definitely not a keyword
 				start_expr(std::make_unique<ASTNode>(token_t::Ident, Expr::Start, lex_range));
 			}
@@ -2040,58 +2169,23 @@ void ScriptContext::LoadScriptFile(string file_path, string into_name) {
 				return true;
 			}
 			lex_range.token = found->token;
+			if(found->action == KWA::ObjIdent && current_block->obj_ident) {
+				current_block->obj_ident = false;
+				start_expr(std::make_unique<ASTNode>(
+					token_t::Ident, Expr::Start, found->meta_value, lex_range));
+			} else {
+				if(found->action == KWA::ObjAssign
+					&& IS_TOKEN(current_block->block, Object)) {
+					if(current_block->obj_ident) {
+						lex_range.token = token_t::O_Assign;
+					}
+					current_block->obj_ident = false;
+				}
+				start_expr(std::make_unique<ASTNode>(
+					lex_range.token, found->parse_class, found->meta_value, lex_range));
+				dbg << "<Op" << uint32_t{found->meta_value} << ":" << lex_range.token << ">";
+			}
 			switch(lex_range.token) {
-			case token_t::O_Length:
-			case token_t::O_Not:
-				start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::OperExpr, 1, lex_range));
-				break;
-			case token_t::O_Dot:
-			case token_t::O_Add:
-			case token_t::O_Sub:
-			case token_t::O_Mul:
-			case token_t::O_Div:
-			case token_t::O_Or:
-			case token_t::O_And:
-			case token_t::O_Xor:
-			case token_t::O_Mod:
-			case token_t::O_Rsh:
-			case token_t::O_Lsh:
-			case token_t::O_RAsh:
-			case token_t::O_Power:
-			case token_t::O_Less:
-			case token_t::O_LessEq:
-			case token_t::O_Greater:
-			case token_t::O_GreaterEq:
-			case token_t::O_NotEq:
-			case token_t::O_EqEq:
-				start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
-				dbg << "<Op2" << lex_range.token << ">";
-				break;
-			case token_t::Arrow:
-				if(IS_TOKEN(current_block->block, Object) && current_block->obj_ident) {
-					current_block->obj_ident = false;
-					start_expr(std::make_unique<ASTNode>(token_t::O_Assign, Expr::RawOper, 2, lex_range));
-				} else {
-					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
-				}
-				dbg << "<Op2" << lex_range.token << ">";
-				break;
-			case token_t::O_Assign:
-				if(IS_TOKEN(current_block->block, Object))
-					current_block->obj_ident = false;
-				start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
-				dbg << "<Op2" << lex_range.token << ">";
-				break;
-			case token_t::O_DotP:
-			case token_t::O_Cross:
-				if(current_block->obj_ident) {
-					current_block->obj_ident = false;
-					start_expr(std::make_unique<ASTNode>(token_t::Ident, Expr::Start, 2, lex_range));
-				} else {
-					start_expr(std::make_unique<ASTNode>(lex_range.token, Expr::RawOper, 2, lex_range));
-					dbg << "<Op2" << lex_range.token << ">";
-				}
-				break;
 			default:
 				dbg << "Unhandled:" << lex_range.token;
 				break;
