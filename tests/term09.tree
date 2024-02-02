@@ -1,0 +1,14 @@
+(Block BlockExpr 0,2/0
+  (K_Let KeywExpr NL 0,1/1
+    (O_Assign OperExpr NL 0,2/2
+      (Ident Start SP "a"),
+      (O_Add OperExpr NL 4,2/2
+        (Number Start SP "1"),
+        (Number Start NL "1")
+      )
+    )
+  ),
+  (K_Let KeywExpr NL 0,1/1
+    (Ident Start NL "a")
+  )
+)

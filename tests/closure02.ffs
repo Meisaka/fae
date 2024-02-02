@@ -1,0 +1,3 @@
+let a = 1
+name => a + a + a
+type n i32

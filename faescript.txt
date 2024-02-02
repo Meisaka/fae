@@ -1,0 +1,303 @@
+name: FaeScript
+file extension (.ffs)
+Almost second name: Tsun
+
+TODO items:
+partial/bug:
+	make closure bind scoped variables that will fall out of scope
+	... or else!
+
+object-like types:
+	function variables as objects or something
+	object variables need... to exist
+	+array variables need... to exist
+	|string variables need... to exist
+		length operator
+		string operators: concat
+		add "for"
+		add "in"
+	constants table
+		object block code gen
+	gc
+remaining normal operators
+namespaces
+	import
+	export
+
+type grammar after the ":"
+	type checking on operators (during compile maybe?)
+	variant type
+array blocks
+ranges
+assignment operators: (+= -= et cet.)
+add labels to grammar/lex
+	goto
+
+optimizations:
+	const variable (don't need to stack them, probably)
+	mutable variable (keep on stack, or skip reload if in register)
+	constant folding (and other similar operations)
+	tail calls (a call at the end of a function, or: "end" function_call )
+
+comments:
+	// line
+	/* block */
+	/* /* nested */ */
+functions
+blocks:
+	scope shadowing
+	tentative:
+	"(" block_expr [(line_sep | ";") block_expr ...] ")"
+	
+possible features:
+
+async/await features
+data pipeline features
+meta programming features: maybe?
+regex support
+maybe destructors
+namespaces
+
+control flow:
+	control flow are expressions
+	kinds:
+		keywords: if else elif elsif elseif
+		else_expr: "else" expresssion
+		elseif_expr: elseif_keyword expression [elseif_expression | else_expression]
+		if_expr: if expresssion [elseif_expression | else_expression]
+		loop while until
+		continue
+		break or break to label
+		end
+		reserved: "do" "as" "of" "with" "match" "kind"
+		"loop" block_expr
+		("while" | "until") test:expr body:block_expr
+		continue, break:
+			valid in "loop","while","until", and "for"
+		break, returns expr from the innermost loop:
+			"break" expr
+		end, returns expr from the current function:
+			"end" expr
+		for in (not sure how this should look)
+		"for" ident "in" list_array_expr block_expr
+		see variables: let mut
+		tbd: import export
+		goto: (for the lolz maybe?)
+			goto_expr: "goto" ( func_ident | goto_ident ) [ "with" tuple_expr ]
+			returns a function type that may be called again with "goto"
+			the returned function type is a continuation
+			"goto" will pass a continuation as the first argument to the called
+			function or continuation
+			the usage of "with" allows extra values to be passed into the continuation
+			within the callee, these are returned as a tuple from "goto"
+			the first element is always the continuation, additional elements
+			are concatenated from the caller's "with"
+	pattern matching
+types:
+	number types:
+		integer:
+			("u" | "i") bit_count
+		floating point (ieee):
+			"f" [ bit_count ]
+		floating point (posit):
+			"p" [ bit_count ] ["e" exp_count]
+		vector:
+			"vec" element_count ("u" | "i" | "f") [ bit_count ]
+			"vec" element_count "p" [ bit_count ] ["e" exp_count ]
+			"vec" element_count "b"
+		string: "string"
+		Boolean: "bool"
+		unit: "_"
+		option:
+			TODO
+		function:
+			argument_types: [ typedef [, typedef] ... ]
+			"(" argument_types ")" "->" return_type
+		array (uniform):
+			typedef "[" [element_count] "]"
+		common grammar:
+			typedef:=
+				literal
+				| type_name:ident
+				| enum_name:ident
+				| tuple_type
+				| array_type
+				| object_type
+			tag_type: ident [ "(" typedef ")" ]
+			mix_type: tag_type | typedef
+			req_tag_type: ident "(" typedef ")"
+			req_type: ( ident "(" typedef ")" ) | typedef
+			enum_literal_expr: integer_literal | string_literal
+		type alias:
+			"type" tag_type
+		enum types:
+			enum_elem: tag_type [ "=" enum_literal_expr ]
+			sequence: "enum" ident "(" enum_elem [ ["|"] enum_elem ]... ")"
+			named: "type" ident "(" req_type [ ["|"] req_type ]... ")"
+			anon: [ "(" ] req_type "|" req_type [ "|" req_type ]... [ ")" ]
+			anon: "(" req_type [ [ "|" ] req_type ]... ")"
+		array (non-uniform):
+			enum_type "[" [element_count] "]"
+		tuple:
+			["type" ident] "{" typedef [ [","] typedef ]... "}"
+		object:
+			"type" ident "{" mix_type [ [","] mix_type ]... "}"
+variables
+	variable mutability:
+		// mutable pattern "mut": write many
+		// immutable pattern "let": read only, write once
+		var_def: var_name [":" typedef]
+		mut_var_def: "mut" var_def
+		var_decl_init:
+			( mut_var_def | ( "let" ( var_def | mut_var_def ) ) )
+		var_decl_expression: var_decl_init ["=" expression]
+		when expression is omitted, the var_decl_expression evaluates to unit
+	tuple assignment:
+		var_tuple_elem: ("_" | var_def | mut_var_def) [ "," [ var_tuple_elem ] ]
+		tuple_decl: var_decl_init "," [ var_tuple_elem ] "=" expression
+		
+		
+expressions and types:
+	expression groups:
+		"(" expression ")"
+	unit expression: "_"
+	integer operators:
+		oct_digit: "_" | "0".."7"
+		digit: "_" | "0".."9"
+		hex_digit: digit | "a".."f" | "A".."F"
+		dec_literal: (["0"] digit ...)
+		oct_literal: ("0o" | "0O") ( oct_digit ...)
+		hex_literal: ("0x" | "0X") ( hex_digit ...)
+		bin_literal: ("0b" | "0B") ( ("0" | "1" | "_") ...)
+		+ - *
+		** (exponent)
+		/ (div or maybe div,mod)
+		% (mod)
+		bitwise:
+			>> (right shift, logical)
+			>>> (right shift, arithmetic, preserves sign bit)
+			<< (left shift)
+			<.< (rotate left, returns rotated value)
+			<_< (rotate left, assigns and returns rotated value)
+			>.> (rotate right)
+			>_> (rotate assign right)
+			when shift expressions are accessed as a tuple:
+				evals to  shifted_val, shifted_out
+				where shifted_val bitwise or with shifted_out would be the rotated value
+			| (bit or)
+			& (bit and)
+			^ (bit xor)
+			! (bit not)
+			- (negate)
+	float operators:
+		+ - * /
+		** (exponent)
+	compare operators
+		> < == != = <=
+		<=>
+	assign operators
+		+= -= *= /= %= **=
+		>>= >>>= <<= <_< >_>
+		|= &= ^=
+	vector type features:
+		.* (dot product)
+		.+ (cross product)
+	strings:
+		delimiter: '\'' | '"'
+		escapes: "\" esc_sequence
+		string_chars: all chars that are not delimiter and not escapes
+		delimiter string_chars delimiter
+	array/list types:
+		zero based (sorry not sorry)
+		literals are "[" [ expression ["," ...] ] [ "," ] "]"
+		unary prefix operator for length: "#" array_expression
+	range types:
+		half open: numeric_literal ".." numeric_literal
+		inclusive: numeric_literal "..=" numeric_literal
+	bool: "true" and "false"
+	functions:
+		should "declare function" keyword exist? (def, f, fn, func, function)
+			>>> no, I think it should not
+		argument: [identifer] [":" type_identifer]
+		argument_list: "(" [ argument ["," [argument ...] ] ] ")"
+		[ argument_list ] "=>" ( expression | object )
+		functions act as closures, and can access varibles in lexical scope
+		argument expressions:
+			argument expansion assignment:
+				["let"|"mut"] identifier ( ["," [identifier]] ... ) "=" ( "." | ( ".[" range_expression "]" ) )
+			full argument list assignment:
+				["let"|"mut"] identifier "=" ".[]"
+			numbered access: ".[" number_literal "]"
+			named access: "." no_whitespace identifier
+			dynamic access: ".[" expression "]"
+			name rebind ("let"|"mut") "." no_whitespace identifier
+				this allows access without the leading "."
+				mutability must also be set this way, argument access is readonly by default
+			using dynamic access will bind all arguments to the function as a list
+		calling:
+		function_expression (
+			"(" expression_list ")"
+			| "[" expression_list "]"
+			| expression_list terminating_token )
+		calling with object:
+		function_expression "{" object_expression "}"
+	object literal types:
+	"this object" accessor: ".{" key "}"
+	"{" (
+			-- "private" var syntax:
+			var_decl_expression
+			-- "public" var syntax:
+			| ( key ("=" | "->") expression)
+			| ((key | oper_name) "=>" function_expression
+			[ "," | ";" | NL ]
+		)... "}"
+	oper_name: operator meta names
+		"." call
+		".=" assign
+		".->" name_access
+		".[]" index
+		".[]=" index_eq
+		".#" length
+		".-." neg
+		".==" test_eq
+		".!=" test_ne
+		".<=>" test_cmp
+		".<" test_less
+		".>" test_greater
+		".<=" test_less_eq
+		".>=" test_greater_eq
+		".+" add
+		".+=" add_eq
+		".-" sub
+		".-=" sub_eq
+		".*" mul
+		".*=" mul_eq
+		"./" div
+		"./=" div_eq
+		".%" mod
+		".%=" mod_eq
+		"./%" divmod
+		"..*" dotp
+		"..+" cross
+		"..+=" cross_eq
+		".&" and
+		".&=" and_eq
+		".|" or
+		".|=" or_eq
+		".^" xor
+		".^=" xor_eq
+		".!" not
+		".**" exp
+		".**=" exp_eq
+		".<<" lsh
+		".<<=" lsh_eq
+		".>>" rsh
+		".>>>" rsh_arith
+		".>>=" rsh_eq
+		".>>>=" rsh_arith_eq
+		".<.<" rotl
+		".>.>" rotr
+		".<_<" rotl_eq
+		".>_>" rotr_eq
+		".^.^" quaterion rotation operator
+
