@@ -1,0 +1,1 @@
+(if 0x40 > 0o3 fun() else thing() + thing())(3)

@@ -1,0 +1,31 @@
+(Block BlockExpr 0
+  (O_CallExpr OperExpr NL
+    : (Block BlockExpr 0
+      (K_If KeywExpr 0
+        : (O_Greater OperExpr SP
+          : (NumberHex Start SP "0x40")
+          : (NumberOct Start SP "0o3")
+        )
+        : (O_CallExpr OperExpr SP
+          : (Ident Start "fun")
+          : (Block BlockExpr 0)
+        )
+        (K_Else KeywExpr 0
+          : (O_Add OperExpr
+            : (O_CallExpr OperExpr SP
+              : (Ident Start "thing")
+              : (Block BlockExpr 0)
+            )
+            : (O_CallExpr OperExpr
+              : (Ident Start "thing")
+              : (Block BlockExpr 0)
+            )
+          )
+        )
+      )
+    )
+    : (Block BlockExpr 0
+      (Number Start "3")
+    )
+  )
+)

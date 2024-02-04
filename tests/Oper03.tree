@@ -1,0 +1,73 @@
+(Block BlockExpr 0
+  (K_If KeywExpr NL 0
+    : (K_True Start SP "true")
+    : (Number Start SP "1")
+    (K_ElseIf KeywExpr SP 0
+      : (K_True Start SP "true")
+      : (Number Start SP "2")
+    )
+    (K_ElseIf KeywExpr SP 0
+      : (K_True Start SP "true")
+      : (Number Start SP "3")
+    )
+    (K_ElseIf KeywExpr SP 0
+      : (K_True Start SP "true")
+      : (Number Start SP "4")
+    )
+    (K_ElseIf KeywExpr SP 0
+      : (K_True Start SP "true")
+      : (Number Start SP "5")
+    )
+    (K_Else KeywExpr NL 0
+      : (Number Start NL "6")
+    )
+  )
+  (K_If KeywExpr NL 0
+    : (O_Add OperExpr SP
+      : (Number Start "1")
+      : (Number Start SP "1")
+    )
+    : (Number Start SP "1")
+    (K_ElseIf KeywExpr SP 0
+      : (Number Start SP "2")
+      : (O_Add OperExpr SP
+        : (Number Start "2")
+        : (Number Start SP "2")
+      )
+    )
+    (K_ElseIf KeywExpr SP 0
+      : (O_Add OperExpr SP
+        : (Number Start "3")
+        : (Number Start SP "3")
+      )
+      : (O_Add OperExpr SP
+        : (Number Start "3")
+        : (Number Start SP "3")
+      )
+    )
+    (K_ElseIf KeywExpr SP 0
+      : (Block BlockExpr SP 0
+        (K_True Start "true")
+      )
+      : (O_Mul OperExpr SP
+        : (Block BlockExpr 0
+          (O_Add OperExpr
+            : (Number Start "4")
+            : (Number Start "4")
+          )
+        )
+        : (Number Start SP "4")
+      )
+    )
+    (K_ElseIf KeywExpr SP 0
+      : (K_True Start SP "true")
+      : (Number Start SP "5")
+    )
+    (K_Else KeywExpr NL 0
+      : (O_Add OperExpr NL
+        : (Number Start SP "6")
+        : (Number Start NL "6")
+      )
+    )
+  )
+)

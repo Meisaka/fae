@@ -1,0 +1,126 @@
+(Block BlockExpr 0
+  (K_Let KeywExpr NL 0
+    : (Ident Start SP "a")
+    : (Number Start NL "1")
+  )
+  (O_Spaceship OperExpr NL
+    : (O_NotEq OperExpr SP
+      : (O_EqEq OperExpr SP
+        : (Ident Start SP "a")
+        : (Ident Start SP "a")
+      )
+      : (Number Start SP "3")
+    )
+    : (O_GreaterEq OperExpr NL
+      : (O_LessEq OperExpr SP
+        : (O_Greater OperExpr SP
+          : (O_Less OperExpr SP
+            : (Number Start SP "4")
+            : (Number Start SP "5")
+          )
+          : (Number Start SP "6")
+        )
+        : (Number Start SP "7")
+      )
+      : (Number Start NL "8")
+    )
+  )
+  (O_AddEq OperExpr NL
+    : (Ident Start SP "a")
+    : (O_Sub OperExpr NL
+      : (O_Add OperExpr SP
+        : (Number Start SP "1")
+        : (Number Start SP "2")
+      )
+      : (O_SubEq OperExpr NL
+        : (Ident Start SP "b")
+        : (O_Mul OperExpr NL
+          : (Number Start SP "3")
+          : (O_MulEq OperExpr NL
+            : (Ident Start SP "c")
+            : (O_Power OperExpr NL
+              : (Number Start SP "4")
+              : (Number Start NL "5")
+            )
+          )
+        )
+      )
+    )
+  )
+  (O_Div OperExpr NL
+    : (Ident Start SP "a")
+    : (O_DivEq OperExpr NL
+      : (Ident Start SP "b")
+      : (O_Mod OperExpr NL
+        : (Number Start SP "1")
+        : (O_ModEq OperExpr NL
+          : (Ident Start SP "c")
+          : (O_DivMod OperExpr NL
+            : (Number Start SP "9")
+            : (Number Start NL "3")
+          )
+        )
+      )
+    )
+  )
+  (O_Or OperExpr NL
+    (O_And OperExpr SP
+      (Ident Start SP "a")
+      (Ident Start SP "a")
+      (Ident Start SP "a")
+    )
+    (Ident Start SP "a")
+    (O_Xor OperExpr NL
+      (Ident Start SP "a")
+      (Ident Start SP "a")
+      (O_AndEq OperExpr NL
+        : (Ident Start SP "a")
+        : (O_OrEq OperExpr NL
+          : (Ident Start SP "b")
+          : (O_XorEq OperExpr NL
+            : (Ident Start SP "c")
+            : (O_Or OperExpr NL
+              : (Ident Start SP "a")
+              : (O_Not OperExpr NL
+                : (Ident Start NL "a")
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (O_Assign OperExpr NL
+    : (Ident Start SP "num")
+    : (O_Or OperExpr NL
+      : (O_And OperExpr SP
+        : (Ident Start SP "a")
+        : (NumberHex Start SP "0xf0")
+      )
+      : (O_And OperExpr NL
+        : (Ident Start SP "b")
+        : (NumberHex Start NL "0xf")
+      )
+    )
+  )
+  (O_RAsh OperExpr NL
+    : (O_Rsh OperExpr SP
+      : (O_Lsh OperExpr SP
+        : (Ident Start SP "a")
+        : (Ident Start SP "b")
+      )
+      : (Ident Start SP "c")
+    )
+    : (Ident Start NL "d")
+  )
+  (O_LshEq OperExpr NL
+    : (Ident Start SP "a")
+    : (O_RshEq OperExpr NL
+      : (Ident Start SP "b")
+      : (O_RAshEq OperExpr NL
+        : (Ident Start SP "c")
+        : (Ident Start NL "d")
+      )
+    )
+  )
+)

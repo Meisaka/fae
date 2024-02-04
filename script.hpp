@@ -24,17 +24,58 @@ struct LexTokenRange {
 
 typedef std::unique_ptr<ASTNode> node_ptr;
 typedef std::vector<node_ptr> expr_list_t;
+enum class ASTSlots : uint8_t {
+	// [2 1] count of fixed slots
+	// [0] is var slots open
+	NONE = 0,
+	VAR = 1,
+	SLOT1 = 2,
+	SLOT1VAR = 3,
+	SLOT2 = 4,
+	SLOT2VAR = 5,
+	SLOTSMASK = 6,
+};
 struct ASTNode {
 	LexTokenRange block;
-	uint32_t meta_value;
 	Token ast_token;
 	Expr asc;
 	uint8_t precedence;
 	WS whitespace;
+	ASTSlots slots;
 	ASTNode() = delete;
 	ASTNode(Token token, Expr a, LexTokenRange lex_range);
-	ASTNode(Token token, Expr a, uint8_t e, LexTokenRange lex_range);
-	expr_list_t expressions;
+	ASTNode(Token token, Expr a, ASTSlots e, LexTokenRange lex_range);
+	node_ptr slot1;
+	node_ptr slot2;
+	expr_list_t list;
+	bool is_open() const {
+		uint8_t flags = static_cast<uint8_t>(slots);
+		if(flags & 1) return true;
+		uint8_t count = (flags & static_cast<uint8_t>(ASTSlots::SLOTSMASK)) >> 1;
+		return (count > 0 && !slot1) || (count > 1 && !slot2);
+	}
+	bool is_slot1_open() const {
+		return (slot_count() > 0 && !slot1);
+	}
+	bool is_slot2_open() const {
+		return (slot_count() > 1 && slot1 && !slot2);
+	}
+	bool is_empty() const {
+		return !slot1 && !slot2 && list.empty();
+	}
+
+	static ASTSlots slot_open(ASTSlots s) {
+		return static_cast<ASTSlots>(static_cast<uint8_t>(s) | 1);
+	}
+	uint8_t slot_count() const {
+		return static_cast<uint8_t>(slots) >> 1;
+	}
+	void mark_open() {
+		slots = slot_open(slots);
+	}
+	void mark_closed() {
+		slots = static_cast<ASTSlots>(static_cast<uint8_t>(slots) & 6);
+	}
 };
 struct ModuleSource {
 	string source;

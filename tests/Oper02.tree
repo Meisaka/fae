@@ -1,0 +1,55 @@
+(Block BlockExpr 0
+  (K_Let KeywExpr NL 0
+    : (Ident Start "a")
+    : (O_Less OperExpr NL
+      : (O_Or OperExpr
+        : (O_Sub OperExpr
+          : (O_Add OperExpr
+            (Number Start "1")
+            (Number Start "2")
+            (O_Minus OperExpr
+              : (Number Start "3")
+            )
+          )
+          : (Number Start "4")
+        )
+        : (O_And OperExpr
+          (O_Xor OperExpr
+            : (Number Start "5")
+            : (Number Start "6")
+          )
+          (O_Mul OperExpr
+            : (O_Div OperExpr
+              : (Number Start "7")
+              : (Number Start "8")
+            )
+            : (Number Start "9")
+          )
+          (O_RAsh OperExpr
+            : (O_Rsh OperExpr
+              : (O_Mod OperExpr
+                : (O_Power OperExpr
+                  : (Number Start "10")
+                  : (Number Start "11")
+                )
+                : (Number Start "12")
+              )
+              : (O_Lsh OperExpr
+                : (Number Start "13")
+                : (Number Start "14")
+              )
+            )
+            : (Number Start "15")
+          )
+        )
+      )
+      : (O_Xor OperExpr NL
+        : (O_Power OperExpr
+          : (Number Start "16")
+          : (Number Start "17")
+        )
+        : (Number Start NL "18")
+      )
+    )
+  )
+)

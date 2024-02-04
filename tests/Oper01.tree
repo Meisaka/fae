@@ -1,0 +1,20 @@
+(Block BlockExpr 0
+  (O_Add OperExpr NL
+    (O_Sub OperExpr
+      : (O_Add OperExpr
+        (Number Start SP "1")
+        (Number Start SP "2")
+        (Number Start SP "3")
+        (Number Start "4")
+        (Number Start "5")
+      )
+      : (Number Start "6")
+    )
+    (Number Start "7")
+    (O_Minus OperExpr
+      : (Number Start "8")
+    )
+    (Number Start "9")
+    (Number Start NL "10")
+  )
+)

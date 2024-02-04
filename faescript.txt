@@ -28,10 +28,15 @@ type grammar after the ":"
 	type checking on operators (during compile maybe?)
 	variant type
 array blocks
-ranges
-assignment operators: (+= -= et cet.)
-add labels to grammar/lex
+ranges:
+	add parser tests for this
+	expr ".." expr
+	expr "..=" expr
+	lit ".." lit
+	lit "..=" lit
+"goto" keyword and parameters for:
 	goto
+pattern matching: spec and grammar
 
 optimizations:
 	const variable (don't need to stack them, probably)
@@ -56,7 +61,6 @@ data pipeline features
 meta programming features: maybe?
 regex support
 maybe destructors
-namespaces
 
 control flow:
 	control flow are expressions

@@ -12,7 +12,9 @@
 #include <assert.h>
 #include "script.hpp"
 
-#define DEBUG_LEXPARSE 0
+#define DEBUG_LEXPARSE 1
+#define DEBUG_WALK
+//#define DEBUG_PARSE
 
 using namespace std::string_view_literals;
 
@@ -67,7 +69,7 @@ std::ostream &operator<<(std::ostream &os, ty tk) { return os << name_of(tk); }
 	f(K_True) f(K_False) \
 	f(K_Import) f(K_Export) \
 	f(K_Type) f(K_Enum) f(O_Sum) f(O_Union) \
-	f(O_RefExpr) \
+	f(O_Decl) f(O_DeclAssign) f(O_CallExpr) \
 	f(O_Minus) f(O_Not) f(O_Length) \
 	f(O_And) f(O_Or) f(O_Xor) \
 	f(O_Add) f(O_Sub) f(O_Mul) f(O_Power) \
@@ -101,6 +103,7 @@ std::ostream &operator<<(std::ostream &os, ty tk) { return os << name_of(tk); }
 	f(RangeIncl) \
 	f(DotOper) f(DotOperEqual) \
 	f(DotOperPlus) f(DotDotPlusEqual) \
+	f(Colon) \
 	f(O_Compose) \
 	f(O_LeftRot) f(O_RightRot) \
 	f(O_LeftRotIn) f(O_RightRotIn) \
@@ -231,6 +234,8 @@ LexCharClass{ '_', '_', {
 	LexNode(LexAction::DefaultNewToken, Token::Dot)
 }},{';',';', {
 	LexNode(LexAction::DefaultNewToken, Token::Semi),
+}},{':',':', {
+	LexNode(LexAction::DefaultNewToken, Token::Colon),
 }},{',',',', {
 	LexNode(LexAction::DefaultNewToken, Token::Comma),
 }},{'=','=', {
@@ -314,79 +319,80 @@ struct ParserKeyword {
 	std::string_view word;
 	Token token;
 	Expr parse_class;
-	uint8_t meta_value;
+	ASTSlots slots;
 	KWA action;
-	ParserKeyword(std::string_view w, Token t, Expr c, uint8_t m) :
-		word{w}, token{t}, parse_class{c}, meta_value{m}, action{KWA::None} {}
-	ParserKeyword(std::string_view w, Token t, Expr c, uint8_t m, KWA act) :
-		word{w}, token{t}, parse_class{c}, meta_value{m}, action{act} {}
+	ParserKeyword(std::string_view w, Token t, Expr c, ASTSlots m) :
+		word{w}, token{t}, parse_class{c}, slots{m}, action{KWA::None} {}
+	ParserKeyword(std::string_view w, Token t, Expr c, ASTSlots m, KWA act) :
+		word{w}, token{t}, parse_class{c}, slots{m}, action{act} {}
 };
 const ParserKeyword keyword_table[] = {
-	{"if"sv, Token::K_If, Expr::KeywExpr, 2},
-	{"else"sv, Token::K_Else, Expr::KeywExpr, 1},
-	{"elif"sv, Token::K_ElseIf, Expr::KeywExpr, 2},
-	{"elf"sv, Token::K_ElseIf, Expr::KeywExpr, 2},
-	{"elsif"sv, Token::K_ElseIf, Expr::KeywExpr, 2},
-	{"elseif"sv, Token::K_ElseIf, Expr::KeywExpr, 2},
-	{"loop"sv, Token::K_Loop, Expr::KeywExpr, 1},
-	{"while"sv, Token::K_While, Expr::KeywExpr, 2},
-	{"until"sv, Token::K_Until, Expr::KeywExpr, 2},
-	{"continue"sv, Token::K_Continue, Expr::KeywExpr, 0},
-	{"end"sv, Token::K_End, Expr::KeywExpr, 1},
-	{"break"sv, Token::K_Break, Expr::KeywExpr, 1},
-	{"for"sv, Token::K_For, Expr::Undefined, 0},
-	{"in"sv, Token::K_In, Expr::Undefined, 1},
-	{"goto"sv, Token::K_Goto, Expr::KeywExpr, 1},
-	{"let"sv, Token::K_Let, Expr::KeywExpr, 1},
-	{"mut"sv, Token::K_Mut, Expr::KeywExpr, 1},
-	{"true"sv, Token::K_True, Expr::Start, 0},
-	{"false"sv, Token::K_False, Expr::Start, 0},
-	{"import"sv, Token::K_Import, Expr::Undefined, 1},
-	{"export"sv, Token::K_Export, Expr::Undefined, 1},
-	{"type"sv, Token::K_Type, Expr::TypeDecl, 2, KWA::Terminate},
-	{"enum"sv, Token::K_Enum, Expr::TypeDecl, 2, KWA::Terminate},
-	{"#"sv ,Token::O_Length, Expr::OperExpr, 1},
-	{"!"sv ,Token::O_Not, Expr::OperExpr, 1},
-	{"&"sv ,Token::O_And, Expr::RawOper, 2},
-	{"|"sv ,Token::O_Or, Expr::RawOper, 2},
-	{"^"sv ,Token::O_Xor, Expr::RawOper, 2},
-	{"+"sv ,Token::O_Add, Expr::RawOper, 2},
-	{"-"sv ,Token::O_Sub, Expr::RawOper, 2},
-	{"*"sv ,Token::O_Mul, Expr::RawOper, 2},
-	{"**"sv ,Token::O_Power, Expr::RawOper, 2},
-	{"/"sv ,Token::O_Div, Expr::RawOper, 2},
-	{"%"sv ,Token::O_Mod, Expr::RawOper, 2},
-	{".*"sv ,Token::O_DotP, Expr::RawOper, 2, KWA::ObjIdent},
-	{".+"sv ,Token::O_Cross, Expr::RawOper, 2, KWA::ObjIdent},
-	{">>"sv ,Token::O_Rsh, Expr::RawOper, 2},
-	{">>>"sv ,Token::O_RAsh, Expr::RawOper, 2},
-	{"<<"sv ,Token::O_Lsh, Expr::RawOper, 2},
-	{"&="sv ,Token::O_AndEq, Expr::RawOper, 2},
-	{"|="sv ,Token::O_OrEq, Expr::RawOper, 2},
-	{"^="sv ,Token::O_XorEq, Expr::RawOper, 2},
-	{"+="sv ,Token::O_AddEq, Expr::RawOper, 2},
-	{"-="sv ,Token::O_SubEq, Expr::RawOper, 2},
-	{"*="sv ,Token::O_MulEq, Expr::RawOper, 2},
-	{"**="sv ,Token::O_PowerEq, Expr::RawOper, 2},
-	{"/="sv ,Token::O_DivEq, Expr::RawOper, 2},
-	{"%="sv ,Token::O_ModEq, Expr::RawOper, 2},
-	{".+="sv ,Token::O_CrossEq, Expr::RawOper, 2, KWA::ObjIdent},
-	{">>="sv ,Token::O_RshEq, Expr::RawOper, 2},
-	{">>>="sv ,Token::O_RAshEq, Expr::RawOper, 2},
-	{"<<="sv ,Token::O_LshEq, Expr::RawOper, 2},
+	{"if"sv, Token::K_If, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"else"sv, Token::K_Else, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"elif"sv, Token::K_ElseIf, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"elf"sv, Token::K_ElseIf, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"elsif"sv, Token::K_ElseIf, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"elseif"sv, Token::K_ElseIf, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"loop"sv, Token::K_Loop, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"while"sv, Token::K_While, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"until"sv, Token::K_Until, Expr::KeywExpr, ASTSlots::SLOT2},
+	{"continue"sv, Token::K_Continue, Expr::KeywExpr, ASTSlots::NONE},
+	{"end"sv, Token::K_End, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"break"sv, Token::K_Break, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"for"sv, Token::K_For, Expr::Undefined, ASTSlots::NONE},
+	{"in"sv, Token::K_In, Expr::Undefined, ASTSlots::SLOT1},
+	{"goto"sv, Token::K_Goto, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"let"sv, Token::K_Let, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"mut"sv, Token::K_Mut, Expr::KeywExpr, ASTSlots::SLOT1},
+	{"true"sv, Token::K_True, Expr::Start, ASTSlots::NONE},
+	{"false"sv, Token::K_False, Expr::Start, ASTSlots::NONE},
+	{"import"sv, Token::K_Import, Expr::Undefined, ASTSlots::SLOT1},
+	{"export"sv, Token::K_Export, Expr::Undefined, ASTSlots::SLOT1},
+	{"type"sv, Token::K_Type, Expr::TypeDecl, ASTSlots::SLOT2, KWA::Terminate},
+	{"enum"sv, Token::K_Enum, Expr::TypeDecl, ASTSlots::SLOT2, KWA::Terminate},
+	{"#"sv ,Token::O_Length, Expr::OperExpr, ASTSlots::SLOT1},
+	{"!"sv ,Token::O_Not, Expr::OperExpr, ASTSlots::SLOT1},
+	{"&"sv ,Token::O_And, Expr::RawOper, ASTSlots::SLOT2},
+	{"|"sv ,Token::O_Or, Expr::RawOper, ASTSlots::SLOT2},
+	{"^"sv ,Token::O_Xor, Expr::RawOper, ASTSlots::SLOT2},
+	{"+"sv ,Token::O_Add, Expr::RawOper, ASTSlots::SLOT2},
+	{"-"sv ,Token::O_Sub, Expr::RawOper, ASTSlots::SLOT2},
+	{"*"sv ,Token::O_Mul, Expr::RawOper, ASTSlots::SLOT2},
+	{"**"sv ,Token::O_Power, Expr::RawOper, ASTSlots::SLOT2},
+	{"/"sv ,Token::O_Div, Expr::RawOper, ASTSlots::SLOT2},
+	{"%"sv ,Token::O_Mod, Expr::RawOper, ASTSlots::SLOT2},
+	{".*"sv ,Token::O_DotP, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjIdent},
+	{".+"sv ,Token::O_Cross, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjIdent},
+	{">>"sv ,Token::O_Rsh, Expr::RawOper, ASTSlots::SLOT2},
+	{">>>"sv ,Token::O_RAsh, Expr::RawOper, ASTSlots::SLOT2},
+	{"<<"sv ,Token::O_Lsh, Expr::RawOper, ASTSlots::SLOT2},
+	{"&="sv ,Token::O_AndEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"|="sv ,Token::O_OrEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"^="sv ,Token::O_XorEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"+="sv ,Token::O_AddEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"-="sv ,Token::O_SubEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"*="sv ,Token::O_MulEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"**="sv ,Token::O_PowerEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"/="sv ,Token::O_DivEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"%="sv ,Token::O_ModEq, Expr::RawOper, ASTSlots::SLOT2},
+	{".+="sv ,Token::O_CrossEq, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjIdent},
+	{">>="sv ,Token::O_RshEq, Expr::RawOper, ASTSlots::SLOT2},
+	{">>>="sv ,Token::O_RAshEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"<<="sv ,Token::O_LshEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"/%"sv ,Token::O_DivMod, Expr::RawOper, ASTSlots::SLOT2},
+	{"<=>"sv ,Token::O_Spaceship, Expr::RawOper, ASTSlots::SLOT2},
 	/*
-	{"/%"sv ,Token::O_DivMod,
 	{"-"sv ,Token::O_Minus,
 	*/
-	{"<"sv ,Token::O_Less, Expr::RawOper, 2},
-	{"="sv ,Token::O_Assign, Expr::RawOper, 2, KWA::ObjAssign},
-	{">"sv ,Token::O_Greater, Expr::RawOper, 2},
-	{"<="sv ,Token::O_LessEq, Expr::RawOper, 2},
-	{">="sv ,Token::O_GreaterEq, Expr::RawOper, 2},
-	{"=="sv ,Token::O_EqEq, Expr::RawOper, 2},
-	{"!="sv ,Token::O_NotEq, Expr::RawOper, 2},
-	{"."sv ,Token::O_Dot, Expr::RawOper, 2},
-	{"->"sv ,Token::Arrow, Expr::RawOper, 2, KWA::ObjAssign},
+	{"<"sv ,Token::O_Less, Expr::RawOper, ASTSlots::SLOT2},
+	{"="sv ,Token::O_Assign, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjAssign},
+	{">"sv ,Token::O_Greater, Expr::RawOper, ASTSlots::SLOT2},
+	{"<="sv ,Token::O_LessEq, Expr::RawOper, ASTSlots::SLOT2},
+	{">="sv ,Token::O_GreaterEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"=="sv ,Token::O_EqEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"!="sv ,Token::O_NotEq, Expr::RawOper, ASTSlots::SLOT2},
+	{"."sv ,Token::O_Dot, Expr::RawOper, ASTSlots::SLOT2},
+	{"->"sv ,Token::Arrow, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjAssign},
 	/*
 	{".."sv ,Token::O_Range,
 	{"..="sv ,Token::RangeIncl,
@@ -422,34 +428,35 @@ Precedence precedence_table[] = {
 	{3, Token::O_RAshEq},
 	{3, Token::O_LshEq},
 
-	{4, Token::O_And},
 	{4, Token::O_Or},
-	{4, Token::O_Xor},
-	{4, Token::O_Add},
-	{4, Token::O_Sub},
+	{5, Token::O_And},
+	{6, Token::O_Xor},
+	{7, Token::O_Add},
+	{7, Token::O_Sub},
 
-	{5, Token::O_Rsh},
-	{5, Token::O_RAsh},
-	{5, Token::O_Lsh},
+	{8, Token::O_Rsh},
+	{8, Token::O_RAsh},
+	{9, Token::O_Lsh},
 
-	{6, Token::O_Mul},
+	{10, Token::O_Mul},
 
-	{7, Token::O_Div},
-	{7, Token::O_Mod},
-	{7, Token::O_DivMod},
+	{11, Token::O_Div},
+	{11, Token::O_Mod},
+	{11, Token::O_DivMod},
 
-	{8, Token::O_Power},
-	{8, Token::O_DotP},
-	{8, Token::O_Cross},
+	{12, Token::O_Power},
+	{12, Token::O_DotP},
+	{12, Token::O_Cross},
 
-	{9, Token::O_Range},
+	{13, Token::O_Range},
 
-	{10, Token::O_Minus},
-	{10, Token::O_Not},
-	{10, Token::O_Length},
+	{14, Token::O_Minus},
+	{14, Token::O_Not},
+	{14, Token::O_Length},
 
-	{11, Token::O_RefExpr},
-	{12, Token::O_Dot},
+	{15, Token::O_CallExpr},
+	{16, Token::O_Dot},
+	{17, Token::O_Decl},
 };
 constexpr auto precedence_table_span = std::span{precedence_table};
 static constexpr uint8_t get_precedence(Token token) {
@@ -472,11 +479,24 @@ std::string_view LexTokenRange::as_string(size_t offset) const {
 ASTNode::ASTNode(Token token, Expr a, LexTokenRange lex_range)
 	: ast_token{token}, asc{a}, block{lex_range},
 	whitespace{WS::NONE}, precedence{get_precedence(token)},
-	meta_value{0} {}
-ASTNode::ASTNode(Token token, Expr a, uint8_t e, LexTokenRange lex_range)
+	slots{ASTSlots::NONE} {}
+ASTNode::ASTNode(Token token, Expr a, ASTSlots e, LexTokenRange lex_range)
 	: ast_token{token}, asc{a}, block{lex_range},
 	whitespace{WS::NONE}, precedence{get_precedence(token)},
-	meta_value{e} {}
+	slots{e} {}
+std::ostream& operator<<(std::ostream &os, const ASTSlots v) {
+	switch(v) {
+	case ASTSlots::NONE: os << "0"; break;
+	case ASTSlots::VAR: os << "0+"; break;
+	case ASTSlots::SLOT1: os << "1"; break;
+	case ASTSlots::SLOT1VAR: os << "1+"; break;
+	case ASTSlots::SLOT2: os << "2"; break;
+	case ASTSlots::SLOT2VAR: os << "2+"; break;
+	default:
+	os << "NONE"; break;
+	}
+	return os;
+}
 std::ostream& operator<<(std::ostream &os, const WS v) {
 	switch(v) {
 	case WS::SP: os << "SP"; break;
@@ -496,31 +516,50 @@ static void show_node_open(std::ostream &os, const ASTNode &node) {
 		|| node.asc == Expr::KeywExpr
 		|| node.asc == Expr::TypeExpr
 		|| node.asc == Expr::TypeDecl
-		|| node.asc == Expr::BlockExpr)
-		os << " " << static_cast<uint32_t>(node.precedence)
-			<< "," << node.expressions.size()
-			<< "/" << static_cast<uint32_t>(node.meta_value);
+		|| node.asc == Expr::BlockExpr) {
+		os << " " << static_cast<uint32_t>(node.precedence);
+	}
+	uint8_t count = node.slot_count();
+	if(node.is_open()) {
+		os << "+";
+		if(count == 1 && !node.slot1) os << "S1";
+		else if(count == 2 && !node.slot2) os << "S2";
+		else os << "E";
+	}
 	if(node.asc == Expr::Start || node.asc == Expr::TypeStart) {
 		os << " \"" << std::string_view(node.block.tk_begin, node.block.tk_end) << '\"';
 	}
 }
 static void show_node(std::ostream &os, const ASTNode &node, int depth) {
 	show_node_open(os, node);
-	bool first = true;
-	for(auto &expr : node.expressions) {
-		if(first) {first = false; os << "\n"; }
-		else os << ",\n";
+	if(node.slot1) {
+		os << "\n";
+		for(int i = 0; i <= depth; i++) os << "  ";
+		os << "A:";
+		if(node.slot1) show_node(os, *node.slot1, depth + 1);
+		else os << "nullnode";
+	}
+	if(node.slot2) {
+		os << "\n";
+		for(int i = 0; i <= depth; i++) os << "  ";
+		os << "B:";
+		if(node.slot2) show_node(os, *node.slot2, depth + 1);
+		else os << "nullnode";
+	}
+	for(auto &expr : node.list) {
+		os << '\n';
 		for(int i = 0; i <= depth; i++) os << "  ";
 		if(expr) show_node(os, *expr, depth + 1);
 		else os << "nullnode";
 	}
-	if(node.expressions.size() > 0) {
-		os << "\n";
+	if(node.slot1 || node.slot2 || node.list.size() > 0) {
+		os << '\n';
 		for(int i = 1; i <= depth; i++) os << "  ";
 	}
 	os << ")";
 }
 struct DiffList {
+	bool fixed;
 	size_t pos;
 	const ASTNode *node;
 	struct DiffList *next;
@@ -538,7 +577,7 @@ void show_recurse_list(std::ostream &out, DiffList *root) {
 	}
 }
 bool show_node_diff_recurse(std::ostream &out, const ASTNode &lhs, const ASTNode &rhs, DiffList *root, DiffList *prev) {
-	DiffList list { 0, &lhs, nullptr };
+	DiffList list { true, 0, &lhs, nullptr };
 	if(root == nullptr) {
 		root = &list;
 	} else {
@@ -547,7 +586,8 @@ bool show_node_diff_recurse(std::ostream &out, const ASTNode &lhs, const ASTNode
 	//out << "Down:" << prev << ',' << &list << '\n';
 	if(lhs.ast_token != rhs.ast_token
 		|| lhs.asc != rhs.asc
-		|| lhs.expressions.size() != rhs.expressions.size()
+		|| lhs.list.size() != rhs.list.size()
+		|| lhs.slots != rhs.slots
 		|| lhs.whitespace != rhs.whitespace) {
 
 		out << '\n';
@@ -558,8 +598,10 @@ bool show_node_diff_recurse(std::ostream &out, const ASTNode &lhs, const ASTNode
 			out << "non-equal token:" << lhs.ast_token << "!=" << rhs.ast_token << "\n";
 		if(lhs.asc != rhs.asc)
 			out << "non-equal asc:" << lhs.asc << "!=" << rhs.asc << "\n";
-		if(lhs.expressions.size() != rhs.expressions.size())
-			out << "non-equal size:" << lhs.expressions.size() << "!=" << rhs.expressions.size() << "\n";
+		if(lhs.list.size() != rhs.list.size())
+			out << "non-equal size:" << lhs.list.size() << "!=" << rhs.list.size() << "\n";
+		if(lhs.slots != rhs.slots)
+			out << "non-equal slots: " << lhs.slots << "!=" << rhs.slots << "\n";
 		if(lhs.whitespace != rhs.whitespace) {
 			out << "non-equal WS:" << lhs.whitespace << "!=" << rhs.whitespace << "\n";
 		}
@@ -573,12 +615,9 @@ bool show_node_diff_recurse(std::ostream &out, const ASTNode &lhs, const ASTNode
 		|| lhs.asc == Expr::BlockExpr)
 		&& (
 		lhs.precedence != rhs.precedence
-		|| lhs.meta_value != rhs.meta_value
 	)) {
 		show_recurse_list(out, root);
 		out << "at:"; show_node_open(out, rhs); out << '\n';
-		if(lhs.meta_value != rhs.meta_value)
-			out << "non-equal meta: " << lhs.meta_value << "!=" << rhs.meta_value << "\n";
 		if(lhs.precedence != rhs.precedence)
 			out << "non-equal precedence: " << uint32_t{lhs.precedence} << "!=" << uint32_t{rhs.precedence} << "\n";
 		return false;
@@ -588,17 +627,52 @@ bool show_node_diff_recurse(std::ostream &out, const ASTNode &lhs, const ASTNode
 		&& lhs.ast_token == Token::Ident
 		&& lhs.block.as_string() != rhs.block.as_string()
 	) {
-		out << "at:"; show_node_open(out, rhs); out << '\n';
 		show_recurse_list(out, root);
+		out << "at:"; show_node_open(out, rhs); out << '\n';
 		out << "string not equal\n";
 		return false;
 	}
-	auto left = lhs.expressions.cbegin();
-	auto right = rhs.expressions.cbegin();
-	while(left != lhs.expressions.cend()) {
-		list.pos = left - lhs.expressions.cbegin();
+	uint8_t count = static_cast<uint8_t>(lhs.slots) >> 1;
+	list.pos = 0;
+	if(count > 0 && (lhs.slot1 && !rhs.slot1) && (!lhs.slot1 && rhs.slot1)) {
+		show_recurse_list(out, root);
+		out << "at:"; show_node_open(out, rhs); out << '\n';
+		if(!lhs.slot1) out << "< slot1 is nullptr\n";
+		else {
+			out << "< "; show_node_open(out, *lhs.slot1);
+		}
+		if(!rhs.slot1) out << "> slot1 is nullptr\n";
+		else {
+			out << "> "; show_node_open(out, *rhs.slot1);
+		}
+		return false;
+	}
+	if(count > 0 && lhs.slot1 && rhs.slot1 && !show_node_diff_recurse(out, *lhs.slot1, *rhs.slot1, root, &list)) {
+		return false;
+	}
+	list.pos = 1;
+	if(count > 1 && (lhs.slot2 && !rhs.slot2) && (!lhs.slot2 && rhs.slot2)) {
+		show_recurse_list(out, root);
+		out << "at:"; show_node_open(out, rhs); out << '\n';
+		if(!lhs.slot2) out << "< slot2 is nullptr\n";
+		else {
+			out << "< "; show_node_open(out, *lhs.slot2);
+		}
+		if(!rhs.slot2) out << "> slot2 is nullptr\n";
+		else {
+			out << "> "; show_node_open(out, *rhs.slot2);
+		}
+		return false;
+	}
+	if(count > 1 && lhs.slot2 && rhs.slot2 && !show_node_diff_recurse(out, *lhs.slot2, *rhs.slot2, root, &list)) {
+		return false;
+	}
+	list.fixed = false;
+	auto left = lhs.list.cbegin();
+	auto right = rhs.list.cbegin();
+	while(left != lhs.list.cend()) {
+		list.pos = left - lhs.list.cbegin();
 		if(!show_node_diff_recurse(out, **left, **right, root, &list)) {
-			if(prev) prev->next = nullptr;
 			return false;
 		}
 		left++; right++;
@@ -629,24 +703,32 @@ struct ExprStackItem {
 	Token current_token = Token::Invalid;
 	Expr current_expr = Expr::End;
 	WS current_ws = WS::NONE;
-	uint32_t meta = 0;
+	ASTSlots meta = ASTSlots::NONE;
 	uint8_t precedence = 0;
+	bool error_tokens = false;
 	std::string::const_iterator token_begin;
-	// "(" token_name expr_name [WS::*] [prec,elem/meta] ["source string"]
-	//     [inner_expr ["," inner_expr]...] ")"
+	// "(" token_name expr_name [WS::*] [prec]["+"] ["source string"]
+	//     [[slotname":"] inner_expr ["," inner_expr]...] ")"
 	auto begin_tree_node = [&]() {
 		auto &up_node = *current_ptr;
 		if(up_node) {
 			// add an empty slot to insert into
-			up_node->expressions.emplace_back(node_ptr{});
+			uint8_t count = up_node->slot_count();
 			stack.push_back(current_ptr);
-			current_ptr = &up_node->expressions.back();
+			if(count > 0 && !up_node->slot1) {
+				current_ptr = &up_node->slot1;
+			} else if(count > 1 && !up_node->slot2) {
+				current_ptr = &up_node->slot2;
+			} else {
+				up_node->list.emplace_back(node_ptr{});
+				current_ptr = &up_node->list.back();
+			}
 		}
 		auto &node = *current_ptr;
 		node = std::make_unique<ASTNode>(
 			current_token, current_expr, meta, LexTokenRange{token_begin, cursor, current_token});
 		node->precedence = precedence;
-		node->meta_value = meta;
+		node->slots = meta;
 		node->whitespace = current_ws;
 	};
 	auto end_tree_node = [&]() {
@@ -662,7 +744,7 @@ struct ExprStackItem {
 	auto init_expr = [&]() {
 		state = 1;
 		current_ws = WS::NONE;
-		meta = 0;
+		meta = ASTSlots::NONE;
 		precedence = 0;
 	};
 	for(;cursor != source_end; cursor++) {
@@ -691,7 +773,7 @@ struct ExprStackItem {
 			if(isalpha(c) || c == '_') { token_begin = cursor; state = 4; }
 			break;
 		case 4: // Expr
-			if(c == ' ') {
+			if(!isalpha(c)) {
 				auto tk = std::string_view(token_begin, cursor);
 				auto found = std::ranges::find(Expr_table_span, tk);
 				if(found != Expr_table_span.end()) {
@@ -700,12 +782,37 @@ struct ExprStackItem {
 					current_expr = Expr::Undefined;
 				}
 				state = 5;
+				if(c == ')') {
+					precedence = get_precedence(current_token);
+					begin_tree_node();
+					end_tree_node();
+					state = 11;
+				}
 			}
 			break;
-		case 5:
+		case 5: // after Expr: prec or WS or string or slot
 			if(c == '"') {
 				token_begin = cursor + 1;
 				state = 10; // string
+			} else if(c == ',' || c == '/') {
+				precedence = get_precedence(current_token);
+				begin_tree_node();
+				error_tokens = true;
+				state = 11;
+			} else if(c == ':') {
+				precedence = get_precedence(current_token);
+				meta = ASTSlots::SLOT1;
+				begin_tree_node();
+				state = 11;
+			} else if(c == '(') {
+				precedence = get_precedence(current_token);
+				begin_tree_node();
+				init_expr();
+			} else if(c == '+') {
+				precedence = get_precedence(current_token);
+				meta = ASTNode::slot_open(meta);
+				begin_tree_node();
+				state = 11;
 			} else if(isdigit(c)) {
 				precedence = c - '0';
 				state = 7;
@@ -721,36 +828,45 @@ struct ExprStackItem {
 				if(tk == "NL") current_ws = WS::NL;
 				state = 7;
 				if(c == ')') {
+					precedence = get_precedence(current_token);
 					begin_tree_node();
 					end_tree_node();
 				}
 			}
 			break;
-		case 7: // parameters (precedence)
+		case 7: // parameters (precedence ["+"]) or (auto precedence ["+"]) or slot or var_slot
+			if(isdigit(c)) {
+				state = 8;
+			}
+			// fallthrough
+		case 8: // precedence continued
 			if(c == '"') {
 				token_begin = cursor + 1;
 				state = 10; // string
+			} else if(c == ',' || c == '/') {
+				if(state == 7) precedence = get_precedence(current_token);
+				begin_tree_node();
+				error_tokens = true;
+				state = 11;
+			} else if(c == '+') {
+				if(state == 7) precedence = get_precedence(current_token);
+				meta = ASTNode::slot_open(meta);
+				begin_tree_node();
+				state = 11;
+			} else if(c == ':') {
+				if(state == 7) precedence = get_precedence(current_token);
+				meta = ASTSlots::SLOT1;
+				begin_tree_node();
+				state = 11;
 			} else if(isdigit(c)) {
 				precedence *= 10;
 				precedence += c - '0';
-			} else if(c == ',') {
-				state = 8;
-			} else if(c == '(') {
-				begin_tree_node();
-				init_expr();
-			}
-			break;
-		case 8: // expressions.size() (ignore)
-			if(c == '/') state = 9;
-			break;
-		case 9:
-			if(isdigit(c)) {
-				meta *= 10;
-				meta += c - '0';
 			} else if(c == ')') {
+				if(state == 7) precedence = get_precedence(current_token);
 				begin_tree_node();
 				end_tree_node();
-			} else {
+			} else if(c == '(') {
+				if(state == 7) precedence = get_precedence(current_token);
 				begin_tree_node();
 				init_expr();
 			}
@@ -765,6 +881,13 @@ struct ExprStackItem {
 			if(c == '(') {
 				// sub-expression
 				init_expr();
+			} else if(c == ':') {
+				meta = (*current_ptr)->slots;
+				if(meta == ASTSlots::VAR) meta = ASTSlots::SLOT1VAR;
+				else if(meta == ASTSlots::SLOT1VAR) meta = ASTSlots::SLOT2VAR;
+				if(meta == ASTSlots::NONE) meta = ASTSlots::SLOT1;
+				else if(meta == ASTSlots::SLOT1) meta = ASTSlots::SLOT2;
+				(*current_ptr)->slots = meta;
 			} else if(c == ')') {
 				// end of expression
 				end_tree_node();
@@ -775,6 +898,8 @@ struct ExprStackItem {
 			break;
 		}
 	}
+	if(error_tokens)
+		std::cerr << "invalid tokens while loading syntax tree\n";
 	return std::move(module);
 }
 
@@ -788,8 +913,12 @@ std::ostream &operator<<(std::ostream &os, const ASTNode &node) {
 	return os;
 }
 node_ptr POP_EXPR(node_ptr &node) {
-	auto b = std::move(node->expressions.back());
-	node->expressions.pop_back();
+	uint8_t count = node->slot_count();
+	if(count >= 2 && node->slot2) return std::move(node->slot2);
+	if(count >= 1 && node->slot1) return std::move(node->slot1);
+	if(node->list.empty()) return node_ptr{};
+	auto b = std::move(node->list.back());
+	node->list.pop_back();
 	return std::move(b);
 }
 void push_into(node_ptr &node, node_ptr &&v) {
@@ -800,13 +929,35 @@ void push_into(node_ptr &node, node_ptr &&v) {
 		node->block.tk_end = v->block.tk_end;
 	}
 	node->whitespace = v->whitespace;
-	node->expressions.emplace_back(std::move(v));
+	uint8_t count = static_cast<uint8_t>(node->slots) >> 1;
+	if(count > 0 && !node->slot1) node->slot1 = std::move(v);
+	else if(count > 1 && !node->slot2) node->slot2 = std::move(v);
+	else {
+		node->mark_closed();
+		node->list.emplace_back(std::move(v));
+	}
+}
+void push_into_open(node_ptr &node, node_ptr &&v) {
+	if(node->block.tk_begin > v->block.tk_begin) {
+		node->block.tk_begin = v->block.tk_begin;
+	}
+	if(node->block.tk_end < v->block.tk_end) {
+		node->block.tk_end = v->block.tk_end;
+	}
+	node->whitespace = v->whitespace;
+	uint8_t count = static_cast<uint8_t>(node->slots) >> 1;
+	if(count > 0 && !node->slot1) node->slot1 = std::move(v);
+	else if(count > 1 && !node->slot2) node->slot2 = std::move(v);
+	else {
+		node->list.emplace_back(std::move(v));
+	}
 }
 #define PUSH_INTO(d, s) push_into(d, std::move(s))
-static constexpr void convert_expr(auto &n, Expr t, uint8_t num) noexcept {
-	n->asc = t; n->meta_value = num;
+#define PUSH_INTO_OPEN(d, s) push_into_open(d, std::move(s))
+static constexpr void convert_expr(auto &n, Expr t, ASTSlots num) noexcept {
+	n->asc = t; n->slots = num;
 }
-#define CONV_N(n, t, num) convert_expr(n, Expr::t, num)
+#define CONV_N(n, t, num) convert_expr(n, Expr::t, ASTSlots::num)
 #define CONV(n, t) n->asc = Expr::t
 static constexpr void convert_token(auto &n, Token t) noexcept {
 	n->ast_token = t;
@@ -816,7 +967,7 @@ static constexpr void convert_token(auto &n, Token t) noexcept {
 #define EXTEND_TO(t, sl, sr) t->block.tk_begin = sl->block.tk_begin; \
 	t->block.tk_end = sr->block.tk_end; \
 	t->whitespace = sr->whitespace;
-#define AT_EXPR_TARGET(id) (id->expressions.size() >= id->meta_value)
+#define AT_EXPR_TARGET(id) !(id)->is_open()
 #define IS_TOKEN(n, t) ((n)->ast_token == Token::t)
 #define IS_CLASS(n, c) ((n)->asc == Expr::c)
 #define IS_OPENTYPEEXPR(n) (((n)->asc == Expr::TypeExpr) && !AT_EXPR_TARGET(n))
@@ -828,9 +979,9 @@ static constexpr void convert_token(auto &n, Token t) noexcept {
 #define MAKE_NODE_FROM1(n, t, cl, s) n = std::make_unique<ASTNode>( \
 Token::t, Expr::cl, LexTokenRange{s->block.tk_begin, s->block.tk_end, Token::t});
 #define MAKE_NODE_N_FROM2(n, t, cl, num, s1, s2) n = std::make_unique<ASTNode>( \
-Token::t, Expr::cl, num, LexTokenRange{s1->block.tk_begin, s2->block.tk_end, Token::t});
+Token::t, Expr::cl, ASTSlots::num, LexTokenRange{s1->block.tk_begin, s2->block.tk_end, Token::t});
 #define MAKE_NODE_N_FROM1(n, t, cl, num, s) n = std::make_unique<ASTNode>( \
-Token::t, Expr::cl, num, LexTokenRange{s->block.tk_begin, s->block.tk_end, Token::t});
+Token::t, Expr::cl, ASTSlots::num, LexTokenRange{s->block.tk_begin, s->block.tk_end, Token::t});
 
 #define DEF_VARIABLE_TYPES(f) \
 	f(Unset) f(Unit) f(Integer) f(Bool) f(Function)
@@ -882,7 +1033,8 @@ std::ostream &operator<<(std::ostream &os, const Variable &v) {
 	f(Negate) f(Not) \
 	f(AndInteger) f(OrInteger) f(XorInteger) \
 	f(LSHInteger) f(RSHLInteger) f(RSHAInteger) \
-	f(CompareLess) f(CompareGreater) f(CompareEqual) f(CompareNotEqual)
+	f(CompareLess) f(CompareGreater) f(CompareEqual) f(CompareNotEqual) \
+	f(CompareLessEqual) f(CompareGreaterEqual) f(CompareSpaceship)
 enum class Opcode {
 #define GENERATE(f) f,
 	DEF_OPCODES(GENERATE)
@@ -984,13 +1136,24 @@ template<typename T>
 constexpr const devnull& operator<<(const devnull &n, const T &t) {
 	return n;
 }
-#if defined(_DEBUG) && defined(DEBUG_LEXPARSE) && (DEBUG_LEXPARSE) != 0
-#define _DP(s) s
+
+#if defined(DEBUG_LEXPARSE) && (DEBUG_LEXPARSE) != 0
+#define DEBUG_LEX
+#define DEBUG_PARSE
+#endif
+#if defined(_DEBUG) && defined(DEBUG_LEX)
 #define _DL(s) s
-#define _DW(s) s
+#else
+#define _DL(s) devnull{}
+#endif
+#if defined(_DEBUG) && defined(DEBUG_PARSE)
+#define _DP(s) s
 #else
 #define _DP(s) devnull{}
-#define _DL(s) devnull{}
+#endif
+#if defined(_DEBUG) && defined(DEBUG_WALK)
+#define _DW(s) s
+#else
 #define _DW(s) devnull{}
 #endif
 
@@ -1032,38 +1195,41 @@ bool convert_number_bin(std::string_view raw_number, uint64_t &output) {
 	return true;
 }
 
-bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_ptr<FrameContext> &ctx, const node_ptr &expr) {
-	auto show_position = [&](const LexTokenRange &block) {
+struct variable_pos {
+	uint32_t up_count = 0;
+	uint32_t decl_index = 0;
+	VariableDeclaration &decl_ref;
+};
+struct WalkContext {
+	std::ostream &dbg;
+	std::ostream &err;
+	ModuleContext &module_ctx;
+	void show_position(std::ostream &out, const LexTokenRange &block) {
 		auto file_start = module_ctx.source.source.cbegin();
 		size_t offset = block.tk_begin - file_start;
 		auto found = std::ranges::lower_bound(module_ctx.line_positions, offset);
 		if(found == module_ctx.line_positions.cend()) {
-			_DW(dbg) << "char:" << offset;
+			_DW(out) << "char:" << offset;
 			return;
 		}
 		auto lines_start = module_ctx.line_positions.cbegin();
 		size_t prev_pos = 0;
 		if(found != lines_start) prev_pos = *(found - 1);
 		size_t line = (found - lines_start) + 1;
-		_DW(dbg) << line << ":" << (offset - prev_pos) << ": ";
-	};
-	auto show_syn_error = [&](const std::string_view what, const auto &node) {
-		_DW(dbg) << '\n' << what << " syntax error: ";
-		show_position(node->block);
-		_DW(dbg) << node->block.as_string() << "\n";
-	};
-	struct variable_pos {
-		uint32_t up_count = 0;
-		uint32_t decl_index = 0;
-		VariableDeclaration &decl_ref;
-	};
-	auto get_var_ref = [&](const size_t string_index) {
+		_DW(out) << line << ":" << (offset - prev_pos) << ": ";
+	}
+	void show_syn_error(const std::string_view what, const auto &node) {
+		_DW(err) << '\n' << what << " syntax error: ";
+		show_position(err, node->block);
+		_DW(err) << node->block.as_string() << "\n";
+	}
+	auto get_var_ref(std::shared_ptr<FrameContext> &ctx, const size_t string_index) {
 		auto search_context = ctx.get();
 		uint32_t up_count = 0;
 		uint32_t decl_index = 0;
 		for(;;) {
 			if(search_context == nullptr) {
-				_DW(dbg) << "variable not found: " << module_ctx.string_table[string_index] << "\n";
+				_DW(err) << "variable not found: " << module_ctx.string_table[string_index] << "\n";
 				return std::optional<variable_pos>();
 			}
 			auto found = std::ranges::find(search_context->var_declarations, string_index, &VariableDeclaration::name_index);
@@ -1077,8 +1243,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			return std::optional(variable_pos{up_count, decl_index, *found});
 		}
 	};
+};
+bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, const node_ptr &expr) {
 	auto str_table = [&](size_t string_index) {
-		return module_ctx.string_table[string_index];
+		return walk.module_ctx.string_table[string_index];
 	};
 	auto begin_scope = [&]() {
 		ctx->scopes.push_back({ctx->current_depth});
@@ -1116,94 +1284,94 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			}
 		}
 	};
-	_DW(dbg) << "Expr:" << expr->ast_token << " ";
+	_DW(walk.dbg) << "Expr:" << expr->ast_token << " ";
 	switch(expr->asc) {
 	case Expr::BlockExpr: {
 		if(IS_TOKEN(expr, Object) || IS_TOKEN(expr, Array)) {
-			_DW(dbg) << "unhandled block type: " << expr->ast_token << '\n';
+			_DW(walk.err) << "unhandled block type: " << expr->ast_token << '\n';
 			return false;
 		}
 		begin_scope();
-		for(auto &walk_node : expr->expressions) {
-			if(!walk_expression(dbg, module_ctx, ctx, walk_node))
+		for(auto &walk_node : expr->list) {
+			if(!walk_expression(walk, ctx, walk_node))
 				return false;
 		}
 		end_scope();
 		//for(auto &ins : block_context->instructions) _DW(dbg) << ins << '\n';
 		if(IS_TOKEN(expr, Block)) {
-			_DW(dbg) << "block end\n";
+			_DW(walk.dbg) << "block end\n";
 			break;
 		} else if(IS_TOKEN(expr, DotArray)) {
-			_DW(dbg) << "argument lookup end\n";
+			_DW(walk.dbg) << "argument lookup end\n";
 			ctx->instructions.emplace_back(Instruction{Opcode::NamedArgLookup});
 			break;
 		}
-		_DW(dbg) << "unhandled block type: " << expr->ast_token << '\n';
+		_DW(walk.err) << "unhandled block type: " << expr->ast_token << '\n';
 		return false;
 	}
 	case Expr::KeywExpr:
-		if(!AT_EXPR_TARGET(expr) && expr->expressions.size() >= 2) {
-			show_syn_error("Keyword expression", expr);
+		if(!AT_EXPR_TARGET(expr) && expr->list.size() >= 2) {
+			walk.show_syn_error("Keyword expression", expr);
 			return false;
 		}
 		switch(expr->ast_token) {
 		case Token::K_Mut:
 		case Token::K_Let: {
-			if(expr->expressions.empty()) {
-				show_syn_error("Let", expr);
+			if(expr->list.empty()) {
+				walk.show_syn_error("Let", expr);
 				return false;
 			}
-			auto item = expr->expressions.front().get();
+			auto item = expr->list.front().get();
 			bool is_mutable = IS_TOKEN(expr, K_Mut);
 			if(IS_TOKEN(item, K_Mut)) {
-				item = item->expressions.front().get();
+				item = item->list.front().get();
 				is_mutable = true;
 			}
 			if(AT_EXPR_TARGET(item) && IS_TOKEN(item, O_Assign)) {
-				if(!IS_TOKEN(item->expressions.front(), Ident)) {
-					show_syn_error("Let assignment expression", item);
+				if(!IS_TOKEN(item->list.front(), Ident)) {
+					walk.show_syn_error("Let assignment expression", item);
 					return false;
 				}
-				size_t string_index = module_ctx.find_or_put_string(
-					item->expressions.front()->block.as_string() );
-				if(!walk_expression(dbg, module_ctx, ctx, item->expressions[1])) return false;
+				size_t string_index = walk.module_ctx.find_or_put_string(
+					item->list.front()->block.as_string() );
+				if(!walk_expression(walk, ctx, item->list[1])) return false;
 				size_t var_index = ctx->current_depth++;
 				size_t decl_index = ctx->var_declarations.size();
 				ctx->var_declarations.emplace_back(VariableDeclaration{string_index, var_index, is_mutable});
-				_DW(dbg) << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << module_ctx.string_table[string_index] << " = \n";
+				_DW(walk.err) << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << walk.module_ctx.string_table[string_index] << " = \n";
 				// assign the value
 				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, decl_index});
 				return true;
 			} else if(IS_TOKEN(item, Ident)) {
-				size_t string_index = module_ctx.find_or_put_string(item->block.as_string());
-				_DW(dbg) << "TODO let decl " << "\n";
+				size_t string_index = walk.module_ctx.find_or_put_string(item->block.as_string());
+				_DW(walk.err) << "TODO let decl " << "\n";
 				return true;
 			} else {
-				show_syn_error("Let expression", item);
+				walk.show_syn_error("Let expression", item);
 			}
 			return false;
 		}
 		case Token::K_If: {
 			if(!AT_EXPR_TARGET(expr)) {
-				show_syn_error("If expression", expr);
+				walk.show_syn_error("If expression", expr);
 				return false;
 			}
-			auto walk_expr = expr->expressions.cbegin();
-			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
+			auto walk_expr = expr->list.cbegin();
+			if(!walk_expression(walk, ctx, *walk_expr)) return false;
 			walk_expr++;
 			size_t skip_pos = ctx->instructions.size();
 			ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
-			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
+			if(!walk_expression(walk, ctx, *walk_expr)) return false;
 			walk_expr++;
 			std::vector<size_t> exit_positions;
 			bool hanging_elseif = false;
-			if(walk_expr == expr->expressions.cend()) { // no else or elseif
+			if(walk_expr == expr->list.cend()) { // no else or elseif
 				ctx->instructions[skip_pos].param = ctx->instructions.size();
 				//ctx->instructions.emplace_back(Instruction{Opcode::LoadUnit, 0});
-			} else while(walk_expr != expr->expressions.cend()) {
+			} else while(walk_expr != expr->list.cend()) {
 				if(IS_TOKEN((*walk_expr), K_ElseIf)) {
-					if((*walk_expr)->expressions.size() != 2) {
-						show_syn_error("ElseIf", *walk_expr);
+					if((*walk_expr)->list.size() != 2) {
+						walk.show_syn_error("ElseIf", *walk_expr);
 						return false;
 					}
 					// cause the previous "if" to exit
@@ -1212,14 +1380,14 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 					// fixup the previous test's "else" jump
 					ctx->instructions[skip_pos].param = ctx->instructions.size();
 					// test expression
-					if(!walk_expression(dbg, module_ctx, ctx, (*walk_expr)->expressions[0])) return false;
+					if(!walk_expression(walk, ctx, (*walk_expr)->list[0])) return false;
 					skip_pos = ctx->instructions.size();
 					hanging_elseif = true; // "else" jump exits if no more branches
 					ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
-					if(!walk_expression(dbg, module_ctx, ctx, (*walk_expr)->expressions[1])) return false;
+					if(!walk_expression(walk, ctx, (*walk_expr)->list[1])) return false;
 				} else if(IS_TOKEN((*walk_expr), K_Else)) {
-					if((*walk_expr)->expressions.size() != 1) {
-						show_syn_error("Else", *walk_expr);
+					if((*walk_expr)->list.size() != 1) {
+						walk.show_syn_error("Else", *walk_expr);
 						return false;
 					}
 					hanging_elseif = false;
@@ -1228,10 +1396,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
 					// fixup the previous test's "else" jump
 					ctx->instructions[skip_pos].param = ctx->instructions.size();
-					if(!walk_expression(dbg, module_ctx, ctx, (*walk_expr)->expressions[0])) return false;
+					if(!walk_expression(walk, ctx, (*walk_expr)->list[0])) return false;
 					break;
 				} else {
-					show_syn_error("If-Else", *walk_expr);
+					walk.show_syn_error("If-Else", *walk_expr);
 					return false;
 				}
 				walk_expr++;
@@ -1245,22 +1413,22 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			return true;
 		}
 		case Token::K_End: {
-			if(expr->expressions.empty()) {
-				show_syn_error("end expression", expr);
+			if(expr->list.empty()) {
+				walk.show_syn_error("end expression", expr);
 			}
-			if(!walk_expression(dbg, module_ctx, ctx, expr->expressions.front())) return false;
+			if(!walk_expression(walk, ctx, expr->list.front())) return false;
 			ctx->instructions.emplace_back(Instruction{Opcode::ExitFunction, 0});
 			return true;
 		}
 		case Token::K_Loop: {
-			if(expr->expressions.size() != 1) {
-				show_syn_error("Loop expression", expr);
+			if(expr->list.size() != 1) {
+				walk.show_syn_error("Loop expression", expr);
 				return false;
 			}
-			auto &inner_expr = expr->expressions.front();
+			auto &inner_expr = expr->list.front();
 			size_t loop_point = ctx->instructions.size();
 			begin_loop_scope(loop_point);
-			if(!walk_expression(dbg, module_ctx, ctx, inner_expr)) return false;
+			if(!walk_expression(walk, ctx, inner_expr)) return false;
 			ctx->instructions.emplace_back(Instruction{Opcode::Jump, loop_point});
 			end_scope();
 			return true;
@@ -1270,10 +1438,10 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 				return e.loop || false;
 			});
 			if(found == ctx->scopes.cend()) {
-				show_syn_error("Continue without Loop", expr);
+				walk.show_syn_error("Continue without Loop", expr);
 				return false;
 			}
-			if(!walk_expression(dbg, module_ctx, ctx, expr->expressions.front())) return false;
+			if(!walk_expression(walk, ctx, expr->list.front())) return false;
 			leave_to_scope(found);
 			found->loop->exit_points.push_back(ctx->instructions.size());
 			ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
@@ -1284,7 +1452,7 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 				return e.loop || false;
 			});
 			if(found == ctx->scopes.cend()) {
-				show_syn_error("Continue without Loop", expr);
+				walk.show_syn_error("Continue without Loop", expr);
 				return false;
 			}
 			leave_to_scope(found);
@@ -1294,123 +1462,124 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 		}
 		case Token::K_Until:
 		case Token::K_While: {
-			if(expr->expressions.size() != 2) {
+			if(expr->list.size() != 2) {
 				if(IS_TOKEN(expr, K_Until))
-					show_syn_error("Until expression", expr);
-				else show_syn_error("While expression", expr);
+					walk.show_syn_error("Until expression", expr);
+				else walk.show_syn_error("While expression", expr);
 				return false;
 			}
-			auto walk_expr = expr->expressions.cbegin();
+			auto walk_expr = expr->list.cbegin();
 			size_t loop_point = ctx->instructions.size();
 			begin_loop_scope(loop_point);
-			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
+			if(!walk_expression(walk, ctx, *walk_expr)) return false;
 			walk_expr++;
 			size_t jump_ins = ctx->instructions.size();
 			if(IS_TOKEN(expr, K_While)) // don't jump to exit
 				ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
 			else ctx->instructions.emplace_back(Instruction{Opcode::JumpIf, 0});
-			if(!walk_expression(dbg, module_ctx, ctx, *walk_expr)) return false;
-			_DW(dbg) << "end " << expr->ast_token
+			if(!walk_expression(walk, ctx, *walk_expr)) return false;
+			_DW(walk.dbg) << "end " << expr->ast_token
 				<< " jump_pos=" << ctx->instructions.size()
 				<< " loop_point=" << loop_point << '\n';
 			ctx->instructions.emplace_back(Instruction{Opcode::Jump, loop_point});
 			ctx->instructions[jump_ins].param = ctx->instructions.size();
 			end_scope();
-			// for(auto &ins : ctx->instructions) _DW(dbg) << ins << '\n';
+			// for(auto &ins : ctx->instructions) _DW(walk.dbg) << ins << '\n';
 			return true;
 		}
 		default:
-			_DW(dbg) << "unhandled keyword\n";
+			_DW(walk.err) << "unhandled keyword\n";
 			return false;
 		}
 		return true;
 	case Expr::TypeDecl:
-		_DW(dbg) << "Unhandled type " << expr;
+		_DW(walk.err) << "Unhandled type " << expr;
 		return true;
 	case Expr::FuncDecl:
 	case Expr::RawOper:
-		show_syn_error("Expression", expr);
+		walk.show_syn_error("Expression", expr);
 		return false;
-	case Expr::OperExpr:
+	case Expr::OperExpr: {
 		if(!AT_EXPR_TARGET(expr)) {
-			show_syn_error("Expression", expr);
+			walk.show_syn_error("Expression", expr);
 			return false;
 		}
-		if(IS_TOKEN(expr, O_RefExpr)) { // function calls
-			if(expr->expressions.size() != 2) {
-				show_syn_error("Function call", expr);
+		if(IS_TOKEN(expr, O_CallExpr)) { // function calls
+			if(expr->list.size() != 2) {
+				walk.show_syn_error("Function call", expr);
 				return false;
 			}
-			_DW(dbg) << "reference: ";
-			if(!walk_expression(dbg, module_ctx, ctx, expr->expressions[0])) return false;
-			_DW(dbg) << "\ncall with: ";
+			_DW(walk.dbg) << "reference: ";
+			if(!walk_expression(walk, ctx, expr->list[0])) return false;
+			_DW(walk.dbg) << "\ncall with: ";
 			// arguments
-			auto &args = expr->expressions[1];
+			auto &args = expr->list[1];
 			bool func_save = false;
 			size_t arg_count = 0;
-			if(IS_TOKEN(args, Block) && args->expressions.empty()) {
+			if(IS_TOKEN(args, Block) && args->list.empty()) {
 				// we have no arguments at all
 				// don't have to do anything
-			} else if(IS_TOKEN(args, Block) && (args->expressions.size() == 1)) {
+			} else if(IS_TOKEN(args, Block) && (args->list.size() == 1)) {
 				func_save = true;
-				auto &arg1 = args->expressions.front();
+				auto &arg1 = args->list.front();
 				ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
 				arg_count = 1;
 				if(IS_CLASS(arg1, OperExpr) && IS_TOKEN(arg1, Comma)) {
-					_DW(dbg) << "comma-sep: ";
-					for(auto &comma_arg : arg1->expressions) {
-						if(!walk_expression(dbg, module_ctx, ctx, comma_arg)) return false;
+					_DW(walk.dbg) << "comma-sep: ";
+					for(auto &comma_arg : arg1->list) {
+						if(!walk_expression(walk, ctx, comma_arg)) return false;
 						ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
 					}
-					arg_count = arg1->expressions.size();
-					_DW(dbg) << "\nargument count: " << arg_count << '\n';
+					arg_count = arg1->list.size();
+					_DW(walk.dbg) << "\nargument count: " << arg_count << '\n';
 				} else {
-					if(!walk_expression(dbg, module_ctx, ctx, arg1)) return false;
+					if(!walk_expression(walk, ctx, arg1)) return false;
 					ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
 				}
 				ctx->instructions.emplace_back(Instruction{Opcode::LoadStack, arg_count});
-			} else if(IS_TOKEN(args, Block) && (args->expressions.size() > 1)) {
+			} else if(IS_TOKEN(args, Block) && (args->list.size() > 1)) {
 				func_save = true;
 				ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
-				for(auto &arg : args->expressions) {
-					if(!walk_expression(dbg, module_ctx, ctx, arg)) return false;
+				for(auto &arg : args->list) {
+					if(!walk_expression(walk, ctx, arg)) return false;
 					ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
 				}
-				arg_count = args->expressions.size();
+				arg_count = args->list.size();
 				ctx->instructions.emplace_back(Instruction{Opcode::LoadStack, arg_count});
 			} else {
-				_DW(dbg) << "unhandled function call\n";
+				_DW(walk.err) << "unhandled function call\n";
 				return false;
 			}
 			ctx->instructions.emplace_back(Instruction{Opcode::CallExpression, arg_count});
 			if(func_save)
 				ctx->instructions.emplace_back(Instruction{Opcode::PopStack, 0});
-			_DW(dbg) << "\n";
+			_DW(walk.dbg) << "\n";
 			return true;
 		} else if(IS_TOKEN(expr, O_Dot)
-			&& expr->expressions.size() == 0
-			&& expr->meta_value == 0) {
-			_DW(dbg) << "Load primary argument(s) operator" << '\n';
+			&& expr->slots == ASTSlots::NONE) {
+			_DW(walk.dbg) << "Load primary argument(s) operator" << '\n';
 			if(ctx->arg_declarations.empty()) {
 				ctx->arg_declarations.emplace_back(VariableDeclaration{0, 0, false});
 			}
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadArg, 0, 0});
 			return true;
 		}
-		_DW(dbg) << "operator: " << expr->ast_token;
-		if(IS_TOKEN(expr, O_Dot) && expr->expressions.size() == 1) {
-			if(!IS_TOKEN(expr->expressions[0], Ident)) {
-				show_syn_error("Dot operator", expr);
+		_DW(walk.dbg) << "operator: " << expr->ast_token;
+		auto expr_itr = expr->list.cbegin();
+		auto expr_end = expr->list.cend();
+		if(IS_TOKEN(expr, O_Dot) && expr->list.size() == 1) {
+			if(!IS_TOKEN(expr->list[0], Ident)) {
+				walk.show_syn_error("Dot operator", expr);
 				return false;
 			}
-			auto arg_string = expr->expressions[0]->block.as_string();
-			size_t string_index = module_ctx.find_or_put_string(arg_string);
+			auto arg_string = expr->list[0]->block.as_string();
+			size_t string_index = walk.module_ctx.find_or_put_string(arg_string);
 			auto search_context = ctx.get();
 			uint32_t up_count = 0;
 			uint32_t arg_index = 0;
 			for(;;) {
 				if(search_context == nullptr) {
-					_DW(dbg) << "named arg not found: " << arg_string << "\n";
+					_DW(walk.err) << "named arg not found: " << arg_string << "\n";
 					return false;
 				}
 				auto found = std::ranges::find(
@@ -1427,114 +1596,219 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			}
 			ctx->instructions.emplace_back(
 				Instruction{Opcode::LoadArg, up_count, arg_index});
-			_DW(dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << up_count << "," << arg_index << "\n";
+			_DW(walk.dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << up_count << "," << arg_index << "\n";
 			return true;
-		} else if(IS_TOKEN(expr, O_Assign) && expr->expressions.size() == 2) {
-			_DW(dbg) << "L ref: ";
-			auto &left_ref = expr->expressions.front();
-			auto &right_ref = expr->expressions.back();
+		} else if(IS_TOKEN(expr, O_Assign) && expr->list.size() == 2) {
+			_DW(walk.dbg) << "L ref: ";
+			auto &left_ref = expr->list.front();
+			auto &right_ref = expr->list.back();
 			if(IS_TOKEN(left_ref, Ident)) {
 				// ok! lookup variable
-				auto string_index = module_ctx.find_or_put_string(left_ref->block.as_string());
-				auto var_pos = get_var_ref(string_index);
+				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
+				auto var_pos = walk.get_var_ref(ctx, string_index);
 				if(!var_pos.has_value()) {
-					_DW(dbg) << "variable not found: " << str_table(string_index) << "\n";
+					_DW(walk.err) << "variable not found: " << str_table(string_index) << "\n";
 					return false;
 				}
 				if(!var_pos.value().decl_ref.is_mut) {
-					_DW(dbg) << "write to immutable variable: " << str_table(string_index) << '\n';
+					_DW(walk.err) << "write to immutable variable: " << str_table(string_index) << '\n';
 					return false;
 				}
-				if(!walk_expression(dbg, module_ctx, ctx, right_ref)) return false;
+				if(!walk_expression(walk, ctx, right_ref)) return false;
 				ctx->instructions.emplace_back(
 					Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
-				_DW(dbg) << "store variable [" << string_index << "]" <<
+				_DW(walk.dbg) << "store variable [" << string_index << "]" <<
 					str_table(string_index) << "->"
 					<< var_pos.value().up_count << ","
 					<< var_pos.value().decl_index << "\n";
 				return true;
 			} else {
-				_DW(dbg) << "unknown reference type: " << expr->expressions.front() << '\n';
+				_DW(walk.err) << "unknown reference type: " << expr->list.front() << '\n';
 				return false;
 			}
-		} else if(expr->expressions.size() >= 1) {
-			_DW(dbg) << "\nexpr L: ";
-			if(!walk_expression(dbg, module_ctx, ctx, expr->expressions[0])) return false;
+		} else if(
+				(
+					IS_TOKEN(expr, O_AndEq)
+					|| IS_TOKEN(expr, O_OrEq)
+					|| IS_TOKEN(expr, O_XorEq)
+					|| IS_TOKEN(expr, O_AddEq)
+					|| IS_TOKEN(expr, O_SubEq)
+					|| IS_TOKEN(expr, O_MulEq)
+					|| IS_TOKEN(expr, O_DivEq)
+					|| IS_TOKEN(expr, O_ModEq)
+					|| IS_TOKEN(expr, O_LshEq)
+					|| IS_TOKEN(expr, O_RAshEq)
+					|| IS_TOKEN(expr, O_RshEq)
+					|| IS_TOKEN(expr, O_Decl)
+				)
+				&& expr->list.size() == 2) {
+			_DW(walk.dbg) << "L ref: ";
+			auto &left_ref = expr->list.front();
+			auto &right_ref = expr->list.back();
+			if(IS_TOKEN(left_ref, Ident)) {
+				// ok! lookup variable
+				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
+				auto var_pos = walk.get_var_ref(ctx, string_index);
+				if(!var_pos.has_value()) {
+					_DW(walk.err) << "variable not found: " << str_table(string_index) << "\n";
+					return false;
+				}
+				if(!var_pos.value().decl_ref.is_mut) {
+					_DW(walk.err) << "write to immutable variable: " << str_table(string_index) << '\n';
+					return false;
+				}
+				ctx->instructions.emplace_back(
+					Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				_DW(walk.dbg) << "load variable [" << string_index  << "]" <<
+					str_table(string_index) << "->"
+					<< var_pos.value().up_count << ","
+					<< var_pos.value().decl_index << "\n";
+				ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+				if(!walk_expression(walk, ctx, right_ref)) return false;
+				switch(expr->ast_token) {
+				case Token::O_AndEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
+					break;
+				case Token::O_OrEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
+					break;
+				case Token::O_XorEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
+					break;
+				case Token::O_AddEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
+					break;
+				case Token::O_SubEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
+					break;
+				case Token::O_MulEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
+					break;
+					//ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
+				case Token::O_DivEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
+					break;
+				case Token::O_ModEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
+					break;
+				case Token::O_LshEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
+					break;
+				case Token::O_RAshEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
+					break;
+				case Token::O_RshEq:
+					ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
+					break;
+				default:
+					_DW(walk.err) << "unhandled assign operator: " << expr->ast_token << '\n';
+					return false;
+				}
+				ctx->instructions.emplace_back(
+					Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				_DW(walk.dbg) << "store variable [" << string_index << "]" <<
+					str_table(string_index) << "->"
+					<< var_pos.value().up_count << ","
+					<< var_pos.value().decl_index << "\n";
+				return true;
+			} else {
+				_DW(walk.err) << "unknown reference type: " << expr->list.front() << '\n';
+				return false;
+			}
+		} else if(expr_itr != expr_end) {
+			_DW(walk.dbg) << "\nexpr L: ";
+			if(!walk_expression(walk, ctx, *expr_itr)) return false;
+			expr_itr++;
+		} else {
+			walk.show_syn_error("unknown operator", expr);
+			return false;
 		}
 		if(IS_TOKEN(expr, O_Dot)) {
-			if(expr->expressions.size() < 2 || !IS_TOKEN(expr->expressions[1], Ident)) {
-				show_syn_error("Dot operator", expr);
+			if(expr->list.size() < 2 || !IS_TOKEN(expr->list[1], Ident)) {
+				walk.show_syn_error("Dot operator", expr);
 				return false;
 			}
-			size_t string_index = module_ctx.find_or_put_string(
-				expr->expressions[1]->block.as_string() );
+			size_t string_index = walk.module_ctx.find_or_put_string(
+				expr->list[1]->block.as_string() );
 			ctx->instructions.emplace_back(Instruction{Opcode::NamedLookup, string_index});
 			return true;
 		}
-		if(expr->expressions.size() >= 2) {
-			_DW(dbg) << "\nexpr R: ";
+		while(expr_itr != expr_end) {
+			_DW(walk.dbg) << "\nexpr R: ";
 			ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
-			if(!walk_expression(dbg, module_ctx, ctx, expr->expressions[1])) return false;
+			if(!walk_expression(walk, ctx, *expr_itr)) return false;
+			switch(expr->ast_token) {
+			case Token::O_Add:
+				ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
+				break;
+			case Token::O_Sub:
+				ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
+				break;
+			case Token::O_Mul:
+				ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
+				break;
+			case Token::O_Div:
+				ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
+				break;
+			case Token::O_Mod:
+				ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
+				break;
+			case Token::O_Power:
+				ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
+				break;
+			case Token::O_And:
+				ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
+				break;
+			case Token::O_Or:
+				ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
+				break;
+			case Token::O_Xor:
+				ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
+				break;
+			case Token::O_RAsh:
+				ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
+				break;
+			case Token::O_Rsh:
+				ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
+				break;
+			case Token::O_Lsh:
+				ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
+				break;
+			case Token::O_Minus:
+				ctx->instructions.emplace_back(Instruction{Opcode::Negate, 0});
+				break;
+			case Token::O_Not:
+				ctx->instructions.emplace_back(Instruction{Opcode::Not, 0});
+				break;
+			case Token::O_Less:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareLess, 0});
+				break;
+			case Token::O_Greater:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareGreater, 0});
+				break;
+			case Token::O_EqEq:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareEqual, 0});
+				break;
+			case Token::O_NotEq:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareNotEqual, 0});
+				break;
+			case Token::O_LessEq:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareLessEqual, 0});
+				break;
+			case Token::O_GreaterEq:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareGreaterEqual, 0});
+				break;
+			case Token::O_Spaceship:
+				ctx->instructions.emplace_back(Instruction{Opcode::CompareSpaceship, 0});
+				break;
+			default:
+				_DW(walk.err) << "unhandled operator: " << expr->ast_token << "\n";
+				return false;
+			}
+			expr_itr++;
 		}
-		switch(expr->ast_token) {
-		case Token::O_Add:
-			ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
-			return true;
-		case Token::O_Sub:
-			ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
-			return true;
-		case Token::O_Mul:
-			ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
-			return true;
-		case Token::O_Div:
-			ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
-			return true;
-		case Token::O_Mod:
-			ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
-			return true;
-		case Token::O_Power:
-			ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
-			return true;
-		case Token::O_And:
-			ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
-			return true;
-		case Token::O_Or:
-			ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
-			return true;
-		case Token::O_Xor:
-			ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
-			return true;
-		case Token::O_RAsh:
-			ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
-			return true;
-		case Token::O_Rsh:
-			ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
-			return true;
-		case Token::O_Lsh:
-			ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
-			return true;
-		case Token::O_Minus:
-			ctx->instructions.emplace_back(Instruction{Opcode::Negate, 0});
-			return true;
-		case Token::O_Not:
-			ctx->instructions.emplace_back(Instruction{Opcode::Not, 0});
-			return true;
-		case Token::O_Less:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareLess, 0});
-			return true;
-		case Token::O_Greater:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareGreater, 0});
-			return true;
-		case Token::O_EqEq:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareEqual, 0});
-			return true;
-		case Token::O_NotEq:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareNotEqual, 0});
-			return true;
-		default:
-			_DW(dbg) << "unhandled operator: " << expr->ast_token << "\n";
-		}
-		return false;
+		return true;
+	}
 	case Expr::Start:
 		switch(expr->ast_token) {
 		case Token::Zero: 
@@ -1543,40 +1817,40 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 		case Token::Number: {
 			uint64_t value = 0;
 			if(!convert_number(expr->block.as_string(), value)) {
-				_DW(dbg) << "invalid number value: " << expr->block.as_string() << "\n";
+				_DW(walk.err) << "invalid number value: " << expr->block.as_string() << "\n";
 				return false;
 			}
-			_DW(dbg) << "number value: " << value << "\n";
+			_DW(walk.dbg) << "number value: " << value << "\n";
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::NumberHex: {
 			uint64_t value = 0;
 			if(!convert_number_hex(expr->block.as_string(), value)) {
-				_DW(dbg) << "invalid number value: " << expr->block.as_string() << "\n";
+				_DW(walk.err) << "invalid number value: " << expr->block.as_string() << "\n";
 				return false;
 			}
-			_DW(dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
+			_DW(walk.dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::NumberOct: {
 			uint64_t value = 0;
 			if(!convert_number_oct(expr->block.as_string(), value)) {
-				_DW(dbg) << "invalid number value: " << expr->block.as_string() << "\n";
+				_DW(walk.err) << "invalid number value: " << expr->block.as_string() << "\n";
 				return false;
 			}
-			_DW(dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
+			_DW(walk.dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::NumberBin: {
 			uint64_t value = 0;
 			if(!convert_number_bin(expr->block.as_string(), value)) {
-				_DW(dbg) << "invalid number value: " << expr->block.as_string() << "\n";
+				_DW(walk.err) << "invalid number value: " << expr->block.as_string() << "\n";
 				return false;
 			}
-			_DW(dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
+			_DW(walk.dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
@@ -1587,15 +1861,15 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadBool, 0});
 			return true;
 		case Token::Ident: {
-			auto string_index = module_ctx.find_or_put_string(expr->block.as_string());
-			auto var_pos = get_var_ref(string_index);
+			auto string_index = walk.module_ctx.find_or_put_string(expr->block.as_string());
+			auto var_pos = walk.get_var_ref(ctx, string_index);
 			if(!var_pos.has_value()) {
-				_DW(dbg) << "variable not found: " << module_ctx.string_table[string_index] << "\n";
+				_DW(walk.err) << "variable not found: " << walk.module_ctx.string_table[string_index] << "\n";
 				return false;
 			}
 			ctx->instructions.emplace_back(
 				Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
-			_DW(dbg) << "load variable [" << string_index  << "]" <<
+			_DW(walk.dbg) << "load variable [" << string_index  << "]" <<
 				expr->block.as_string() << "->"
 				<< var_pos.value().up_count << ","
 				<< var_pos.value().decl_index << "\n";
@@ -1605,16 +1879,16 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 			auto s = expr->block.as_string(1);
 			for(auto c : s) {
 				if(c == '\\') {
-					_DW(dbg) << "unhandled string: " << s << "\n";
+					_DW(walk.err) << "unhandled string: " << s << "\n";
 					return false;
 				}
 			}
-			size_t string_index = module_ctx.find_or_put_string(s);
+			size_t string_index = walk.module_ctx.find_or_put_string(s);
 			ctx->instructions.emplace_back(Instruction{Opcode::LoadString, string_index});
 			return true;
 		}
 		default:
-			_DW(dbg) << "unhandled start token: " << expr->ast_token << "\n";
+			_DW(walk.err) << "unhandled start token: " << expr->ast_token << "\n";
 		}
 		return false;
 	case Expr::End: {
@@ -1623,60 +1897,50 @@ bool walk_expression(std::ostream &dbg, ModuleContext &module_ctx, std::shared_p
 	}
 	case Expr::FuncExpr: {
 		if(!AT_EXPR_TARGET(expr)) {
-			show_syn_error("Function expression", expr);
+			walk.show_syn_error("Function expression", expr);
 			return false;
 		}
-		_DW(dbg) << "TODO function start " << expr->block.as_string() << '\n';
-		auto function_context = std::make_shared<FrameContext>(module_ctx.frames.size(), ctx);
-		module_ctx.frames.push_back(function_context);
+		_DW(walk.dbg) << "TODO function start " << expr->block.as_string() << '\n';
+		auto function_context = std::make_shared<FrameContext>(walk.module_ctx.frames.size(), ctx);
+		walk.module_ctx.frames.push_back(function_context);
 		ctx->instructions.emplace_back(Instruction{Opcode::LoadClosure, function_context->frame_index});
 		// expr_args // TODO named argument list for the function declaration
-		auto &expr_args = expr->expressions[0];
+		auto &expr_args = expr->list[0];
 		if(IS_TOKEN(expr_args, Block)) {
-			if(!expr_args->expressions.empty()) {
-				auto &arg1 = expr_args->expressions[0];
-				if(IS_TOKEN(arg1, Ident)) {
-					auto string_index =
-						module_ctx.find_or_put_string(arg1->block.as_string());
-					function_context->arg_declarations.emplace_back(
-						VariableDeclaration{string_index, 0});
-				} else {
-					_DW(dbg) << "unknown block function argument type: " << arg1 << '\n';
-					return false;
-				}
-			}
+			_DW(walk.err) << "unknown block function argument type: " << expr_args << '\n';
+			return false;
 		} else if((IS_CLASS(expr_args, OperExpr) && IS_TOKEN(expr_args, Comma))) {
-			auto &comma_list = expr_args->expressions;
+			auto &comma_list = expr_args->list;
 			for(auto &arg : comma_list) {
 				if(!IS_TOKEN(arg, Ident)) {
-					_DW(dbg) << "unknown list function argument type: " << arg << '\n';
+					_DW(walk.err) << "unknown list function argument type: " << arg << '\n';
 					return false;
 				}
 				auto string_index =
-					module_ctx.find_or_put_string(arg->block.as_string());
+					walk.module_ctx.find_or_put_string(arg->block.as_string());
 				function_context->arg_declarations.emplace_back(
 					VariableDeclaration{string_index,
 					function_context->arg_declarations.size()});
 			}
 		} else {
-			_DW(dbg) << "unknown function argument type: " << expr->expressions[0] << '\n';
+			_DW(walk.err) << "unknown function argument type: " << expr->list[0] << '\n';
 			return false;
 		}
-		// expr->expressions[1] // expression or block forming the function body
-		if(IS_TOKEN(expr->expressions[1], Block)) {
-			for(auto &walk_node : expr->expressions[1]->expressions) {
-				if(!walk_expression(dbg, module_ctx, function_context, walk_node))
+		// expr->list[1] // expression or block forming the function body
+		if(IS_TOKEN(expr->list[1], Block)) {
+			for(auto &walk_node : expr->list[1]->list) {
+				if(!walk_expression(walk, function_context, walk_node))
 					return false;
 			}
 		} else {
-			if(!walk_expression(dbg, module_ctx, function_context, expr->expressions[1]))
+			if(!walk_expression(walk, function_context, expr->list[1]))
 				return false;
 		}
-		_DW(dbg) << "function end\n";
+		_DW(walk.dbg) << "function end\n";
 		break;
 	}
 	default:
-		_DW(dbg) << "Unhandled expression " << expr->ast_token << ":" << expr->asc << ": " << std::string_view(expr->block.tk_begin, expr->block.tk_end);
+		_DW(walk.err) << "Unhandled expression " << expr->ast_token << ":" << expr->asc << ": " << std::string_view(expr->block.tk_begin, expr->block.tk_end);
 		return false;
 	}
 	return true;
@@ -1689,6 +1953,7 @@ struct CollapseContext {
 	bool terminating;
 	Expr down_to;
 	bool error;
+	bool held;
 
 	void terminate() {
 		this->terminating = true;
@@ -1717,16 +1982,14 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 				)
 		) {
 			_DP(ctx.dbg) << "<TypeMerge>";
-			std::ranges::move(head->expressions, std::back_inserter(prev->expressions));
-			prev->meta_value--;
-			prev->meta_value += head->meta_value;
+			std::ranges::move(head->list, std::back_inserter(prev->list));
 			prev->whitespace = head->whitespace;
 			head.reset();
 			return true;
 		}
 		_DP(ctx.dbg) << "<TypeCol>";
 		PUSH_INTO(prev, head);
-	} else if(IS_CLASS(prev, FuncExpr) && !AT_EXPR_TARGET(prev)
+	} else if(IS_CLASS(prev, FuncExpr) && prev->is_slot2_open()
 		&& ctx.down_to != Expr::FuncExpr
 		&& (
 			IS_CLASS(head, BlockExpr)
@@ -1758,19 +2021,35 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		)))
 	) {
 		_DP(ctx.dbg) << "<KeyEx>";
-		if(!AT_EXPR_TARGET(prev)) {
+		if(prev->is_open()) {
 			prev->whitespace = head->whitespace;
-			PUSH_INTO(prev, head);
+			if(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut)) {
+				if(IS_TOKEN(head, O_Assign) && prev->is_empty()) {
+					EXTEND_TO(prev, prev, head);
+					prev->slots = ASTSlots::SLOT2;
+					prev->slot1 = std::move(head->slot1);
+					prev->slot2 = std::move(head->slot2);
+					head.reset();
+					return true;
+				} else if(IS_TOKEN(head, Ident)) {
+					PUSH_INTO(prev, head);
+				} else {
+					_DP(ctx.dbg) << "\n<unhandled Let: " << head << '\n';
+					return false;
+				}
+			} else {
+				PUSH_INTO(prev, head);
+			}
 		} else {
-			_DP(ctx.dbg) << "\n<unhandled KeywExpr *Expr>";
+			_DP(ctx.dbg) << "\n<unhandled KeywExpr *Expr>: " << prev << ',' << head << '\n';
 			return false;
 		}
 	} else if(
 		IS_OPENEXPR(prev) && IS_TOKEN(head, O_Dot)
-		&& head->expressions.size() == 0
-		&& head->meta_value > 0
+		&& head->is_empty()
+		&& head->slots != ASTSlots::NONE
 	) {
-		head->meta_value = 0;
+		head->slots = ASTSlots::NONE;
 	} else if(
 		IS_OPENEXPR(prev)
 		&& (IS_CLASS(head, Start)
@@ -1796,7 +2075,7 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 	) {
 		if(IS_TOKEN(prev, O_Sub))
 			CONV_TK(prev, O_Minus);
-		CONV_N(prev, OperExpr, 1);
+		CONV_N(prev, OperExpr, SLOT1);
 	} else if(IS_OPENEXPR(prev) && IS_FULLEXPR(head)) {
 		// collapse the tree one level
 		_DP(ctx.dbg) << "<OpCol>";
@@ -1807,30 +2086,58 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			// ex1front push_into ex2
 			// ex2 insert_into ex1front
 			auto decend_item = &head;
-			auto upper_item = decend_item;
-			while(IS_CLASS(*decend_item, OperExpr) && (*decend_item)->precedence <= prev->precedence) {
+			node_ptr *upper_item = nullptr;
+			while(
+				IS_CLASS(*decend_item, OperExpr)
+				&& !(
+					IS_TOKEN(*decend_item, O_AndEq)
+					|| IS_TOKEN(*decend_item, O_OrEq)
+					|| IS_TOKEN(*decend_item, O_XorEq)
+					|| IS_TOKEN(*decend_item, O_AddEq)
+					|| IS_TOKEN(*decend_item, O_SubEq)
+					|| IS_TOKEN(*decend_item, O_MulEq)
+					|| IS_TOKEN(*decend_item, O_DivEq)
+					|| IS_TOKEN(*decend_item, O_ModEq)
+					|| IS_TOKEN(*decend_item, O_LshEq)
+					|| IS_TOKEN(*decend_item, O_RAshEq)
+					|| IS_TOKEN(*decend_item, O_RshEq)
+					|| IS_TOKEN(*decend_item, O_Decl)
+					)
+				&& (*decend_item)->precedence <= prev->precedence) {
 				_DP(ctx.dbg) << "\\";
-				if(merge == (*decend_item)->ast_token
-					&& (merge == Token::Comma
-						|| merge == Token::O_Dot
-						|| merge == Token::O_Assign
-						|| merge == Token::O_Or
-						|| merge == Token::O_And
-						|| merge == Token::O_Xor
-						|| merge == Token::O_Add
-						|| merge == Token::O_Mul
-						)
-				) {
-					auto &inner = *decend_item;
-					_DP(ctx.dbg) << "<LEC " << *decend_item << ">";
-					std::ranges::move(inner->expressions, std::back_inserter(prev->expressions));
-					prev->meta_value--;
-					prev->meta_value += inner->meta_value;
-					prev->whitespace = inner->whitespace;
-					inner = std::move(prev);
-					return true;
+				upper_item = decend_item;
+				if((*decend_item)->slot_count() > 0) {
+					decend_item = &(*decend_item)->slot1;
+				} else {
+					decend_item = &(*decend_item)->list.front();
 				}
-				decend_item = &(*decend_item)->expressions.front();
+			}
+			if(upper_item
+				&& merge == (*upper_item)->ast_token
+				&& IS_CLASS(*upper_item, OperExpr)
+				&& (merge == Token::Comma
+					|| merge == Token::O_Dot
+					|| merge == Token::O_Assign
+					|| merge == Token::O_Or
+					|| merge == Token::O_And
+					|| merge == Token::O_Xor
+					|| merge == Token::O_Add
+					|| merge == Token::O_Mul
+					)
+			) {
+				auto &inner = *upper_item;
+				_DP(ctx.dbg) << "<LEC " << inner << ">";
+				if(prev->slots != ASTSlots::NONE) {
+					if(prev->slot1) prev->list.emplace_back(std::move(prev->slot1));
+					if(prev->slot2) prev->list.emplace_back(std::move(prev->slot2));
+					prev->slots = ASTSlots::NONE;
+				}
+				if(inner->slot1) prev->list.emplace_back(std::move(inner->slot1));
+				if(inner->slot2) prev->list.emplace_back(std::move(inner->slot2));
+				std::ranges::move(inner->list, std::back_inserter(prev->list));
+				prev->whitespace = inner->whitespace;
+				inner = std::move(prev);
+				return true;
 			}
 			_DP(ctx.dbg) << "<LED " << *decend_item << ">";
 			PUSH_INTO(prev, *decend_item);
@@ -1850,7 +2157,7 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 	} else if(IS2C(KeywExpr, KeywExpr)) {
 		if(
 			IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
-			&& !IS_TOKEN(prev->expressions.back(), K_Else)
+			&& (prev->list.empty() || !IS_TOKEN(prev->list.back(), K_Else))
 			&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
 			&& AT_EXPR_TARGET(head)
 		) {
@@ -1893,50 +2200,50 @@ static bool parse3nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_
 			comma_list = std::move(prev);
 		} else {
 			_DP(ctx.dbg) << "\n<name func one arg>";
-			MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, 1, prev);
+			MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, NONE, prev);
 			PUSH_INTO(comma_list, prev);
 		}
-		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
+		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, SLOT2, third);
 		bool is_obj = IS_TOKEN(ctx.current_block->block, Object);
 		if(!is_obj) {
-			auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, third);
+			auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, SLOT1, third);
 			PUSH_INTO(let_assign, third);
 			third = std::move(let_expr);
 		}
 		prev = std::move(let_assign);
-		CONV_N(head, FuncExpr, 2);
+		CONV_N(head, FuncExpr, SLOT2);
 		PUSH_INTO(head, comma_list);
 	} else if(
 		(IS_TOKEN(third, K_Let) && AT_EXPR_TARGET(third)
-		&& IS_TOKEN(third->expressions.back(), Ident))
+		&& IS_TOKEN(third->slot1, Ident) && third->slots == ASTSlots::SLOT1)
 		&& IS_CLASS(prev, BlockExpr)
 		&& IS_CLASS(head, FuncDecl)
 	) {
 		// TODO check let is well formed
 		// let function with one argument or comma arg list
 		node_ptr comma_list;
-		if(prev->expressions.size() > 0) {
-			auto &inner = prev->expressions.front();
+		if(prev->list.size() > 0) {
+			auto &inner = prev->list.front();
 			if(IS_TOKEN(inner, Comma)) {
 				_DP(ctx.dbg) << "\n<let block func comma args>";
 				comma_list = std::move(inner);
 			} else {
 				_DP(ctx.dbg) << "\n<let block func one arg>";
-				MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, 1, prev);
+				MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, NONE, prev);
 				PUSH_INTO(comma_list, inner);
 			}
 		} else {
 			_DP(ctx.dbg) << "\n<let block func zero arg>";
-			MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, 0, prev);
+			MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, NONE, prev);
 		}
-		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
+		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, SLOT2, third);
 		PUSH_INTO(let_assign, POP_EXPR(third));
 		prev = std::move(let_assign);
-		CONV_N(head, FuncExpr, 2);
+		CONV_N(head, FuncExpr, SLOT2);
 		PUSH_INTO(head, comma_list);
 	} else if(
 		(IS_TOKEN(third, K_Let) && AT_EXPR_TARGET(third)
-		&& IS_TOKEN(third->expressions.back(), Ident))
+		&& IS_TOKEN(third->slot1, Ident) && third->slots == ASTSlots::SLOT1)
 		&& (IS_TOKEN(prev, Ident)
 			|| (IS_FULLEXPR(prev) && IS_TOKEN(prev, Comma))
 			)
@@ -1950,25 +2257,35 @@ static bool parse3nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_
 			comma_list = std::move(prev);
 		} else {
 			_DP(ctx.dbg) << "\n<let func one arg>";
-			MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, 2, prev);
+			MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, NONE, prev);
 			PUSH_INTO(comma_list, prev);
 		}
-		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, third);
+		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, SLOT2, third);
 		PUSH_INTO(let_assign, POP_EXPR(third));
 		prev = std::move(let_assign);
-		CONV_N(head, FuncExpr, 2);
+		CONV_N(head, FuncExpr, SLOT2);
 		PUSH_INTO(head, comma_list);
 	} else if(IS2C(KeywExpr, KeywExpr)) {
 		if(IS_TOKEN(third, K_If) && AT_EXPR_TARGET(third)
 			&& IS_TOKEN(prev, K_ElseIf) && AT_EXPR_TARGET(prev)
 		) {
+			_DP(ctx.dbg) << "<IfElf*>";
 			PUSH_INTO(third, prev);
 			return true;
-		} else if(IS_TOKEN(prev, K_Else) && prev->expressions.size() == 0
+		} else if(IS_TOKEN(prev, K_Else) && prev->is_empty()
 			&& IS_TOKEN(head, K_If)
 		) {
+			_DP(ctx.dbg) << "<Elf>";
 			prev.reset();
 			CONV_TK(head, K_ElseIf);
+		} else if(IS_TOKEN(third, K_If) && !third->is_open()
+			&& (third->list.empty() || !IS_TOKEN(third->list.back(), K_Else))
+			&& IS_TOKEN(prev, K_Else) && AT_EXPR_TARGET(prev)
+		) {
+			_DP(ctx.dbg) << "<IfElse>";
+			//PUSH_INTO(third, prev);
+			ctx.terminate();
+			return true;
 		} else {
 			_DP(ctx.dbg) << "\n<unhandled" << ctx.terminating << " Key Key\nT:"
 				<< third->ast_token << " " << third->asc
@@ -1977,34 +2294,13 @@ static bool parse3nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_
 			ctx.error = true;
 			return true;
 		}
-	} else if(
-		IS_CLASS(third, KeywExpr) && !AT_EXPR_TARGET(third)
-		&& (IS_CLASS(prev, Start)
-			|| IS_CLASS(prev, BlockExpr)
-			|| (IS_CLASS(prev, FuncExpr) && AT_EXPR_TARGET(prev))
-			|| IS_FULLEXPR(prev)
-			|| (IS_CLASS(prev, KeywExpr) && AT_EXPR_TARGET(prev)
-				&& (IS_TOKEN(prev, K_If)
-					|| IS_TOKEN(prev, K_While)
-					|| IS_TOKEN(prev, K_Until)
-					|| IS_TOKEN(prev, K_Loop)
-				))
-		) && (IS_CLASS(head, Start)
-			|| IS_CLASS(head, TypeDecl)
-			|| IS_CLASS(head, KeywExpr)
-			|| IS_CLASS(head, BlockExpr)
-			|| IS_FULLEXPR(head))
-	) {
-		// ex2 push_info ex3
-		PUSH_INTO(third, prev);
-		return true;
 	} else return false;
 	return true;
 };
 static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 	auto &expr_list = ctx.current_block->expr_list;
 	if(
-		IS_CLASS(prev, TypeDecl) && prev->expressions.size() == 0
+		IS_CLASS(prev, TypeDecl) && prev->is_slot1_open()
 		&& IS_TOKEN(head, Ident)
 	) {
 		if(IS_CLASS(head, Start)) CONV(head, TypeStart);
@@ -2018,17 +2314,16 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		return true;
 	} else if(
 		IS_CLASS(prev, TypeStart) && prev->whitespace == WS::NONE
-		&& prev->expressions.empty()
 		&& IS_CLASS(head, BlockExpr)
 	) {
-		auto MAKE_NODE_N_FROM2(tag, TypeTag, TypeExpr, 2, prev, head);
+		auto MAKE_NODE_N_FROM2(tag, TypeTag, TypeExpr, SLOT2, prev, head);
 		PUSH_INTO(tag, prev);
 		PUSH_INTO(tag, head);
 		prev = std::move(tag);
 		_DP(ctx.dbg) << "<TypeTag>";
 	} else if(
 		IS_CLASS(prev, TypeDecl)
-		&& prev->expressions.size() == 1
+		&& prev->is_slot2_open()
 		&& IS_CLASS(head, BlockExpr)
 	) {
 		if(IS_TOKEN(head, Object)) CONV_TK(head, TypeObject);
@@ -2055,7 +2350,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			|| link == Token::Comma
 		) {
 			if(link == prev->ast_token) {
-				prev->meta_value++;
+				prev->mark_open();
 				head.reset();
 				_DP(ctx.dbg) << "<TypeOpInc>";
 				return true;
@@ -2072,20 +2367,20 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		if(IS_TOKEN(head, O_Or)) { CONV_TK(head, O_Sum); }
 		else if(IS_TOKEN(head, O_And)) { CONV_TK(head, O_Union); }
 		CONV(head, TypeExpr);
-		PUSH_INTO(head, prev);
+		PUSH_INTO_OPEN(head, prev);
 		_DP(ctx.dbg) << "\n<TypeOp>";
 	} else if(IS_FULLTYPEDECL(prev) && IS_CLASS(head, TypeDecl)) {
 		_DP(ctx.dbg) << "\n<TypeSep>";
 	} else if(IS_CLASS(prev, Start) && !IS_TOKEN(prev, Ident)
 		&& IS_CLASS(head, RawOper) && IS_TOKEN(head, O_Dot)
 	) {
-		CONV_N(head, OperExpr, 1);
+		CONV_N(head, OperExpr, SLOT1);
 		_DP(ctx.dbg) << "\n<RawOpPfx>";
 	} else if((IS_CLASS(prev, Start) || IS_CLASS(prev, BlockExpr))
 		&& IS_CLASS(head, RawOper)
 	) {
 		CONV(head, OperExpr);
-		PUSH_INTO(head, prev);
+		PUSH_INTO_OPEN(head, prev);
 		_DP(ctx.dbg) << "\n<RawOp>";
 	} else if(
 		IS_CLASS(prev, OperExpr)
@@ -2093,7 +2388,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		&& IS_TOKEN(prev, Comma)
 		&& IS_CLASS(head, FuncDecl)
 	) {
-		CONV_N(head, FuncExpr, 2);
+		CONV_N(head, FuncExpr, SLOT2);
 		PUSH_INTO(head, prev);
 		// function anon with comma arg list
 		_DP(ctx.dbg) << "\n<anon func no args>";
@@ -2102,14 +2397,14 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 	) {
 		bool is_obj = IS_TOKEN(ctx.current_block->block, Object);
 		auto prev_ptr = prev.get();
-		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, 2, prev_ptr);
+		auto MAKE_NODE_N_FROM1(let_assign, O_Assign, OperExpr, SLOT2, prev_ptr);
 		PUSH_INTO(let_assign, prev);
 		if(!is_obj) {
-			auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, 1, prev_ptr);
+			auto MAKE_NODE_N_FROM1(let_expr, K_Let, KeywExpr, SLOT1, prev_ptr);
 			prev = std::move(let_expr);
 		}
-		auto MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, 0, head);
-		CONV_N(head, FuncExpr, 2);
+		auto MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, NONE, head);
+		CONV_N(head, FuncExpr, SLOT2);
 		PUSH_INTO(head, comma_list);
 		if(!is_obj) expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
 		else prev = std::move(let_assign);
@@ -2120,10 +2415,10 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		&& AT_EXPR_TARGET(prev)
 		&& IS_CLASS(head, FuncDecl)
 	) {
-		CONV_N(head, FuncExpr, 2);
-		auto MAKE_NODE_N_FROM2(let_assign, O_Assign, OperExpr, 2, prev, head);
+		CONV_N(head, FuncExpr, SLOT2);
+		auto MAKE_NODE_N_FROM2(let_assign, O_Assign, OperExpr, SLOT2, prev, head);
 		PUSH_INTO(let_assign, POP_EXPR(prev));
-		auto MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, 0, head);
+		auto MAKE_NODE_N_FROM1(comma_list, Comma, OperExpr, NONE, head);
 		PUSH_INTO(head, comma_list);
 		expr_list.insert(expr_list.cend() - 1, std::move(let_assign));
 		_DP(ctx.dbg) << "\n<LetFn>";
@@ -2132,27 +2427,27 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		&& IS_CLASS(head, FuncDecl)
 	) {
 		_DP(ctx.dbg) << "\n<func no third>";
-		CONV_N(head, FuncExpr, 2);
+		CONV_N(head, FuncExpr, SLOT2);
 		PUSH_INTO(head, prev);
 	} else if(IS2C(BlockExpr, FuncDecl)) {
 		// anon function with blocked arg list
 		// or named function with blocked arg list?
 		_DP(ctx.dbg) << "\n<func block>";
-		CONV_N(head, FuncExpr, 2);
-		if(prev->expressions.size() == 1
-				&& IS_TOKEN(prev->expressions.front(), Comma)
-				&& AT_EXPR_TARGET(prev->expressions.front())
+		CONV_N(head, FuncExpr, SLOT2);
+		if(prev->list.size() == 1
+				&& IS_TOKEN(prev->list.front(), Comma)
+				&& AT_EXPR_TARGET(prev->list.front())
 			) {
-			PUSH_INTO(head, prev->expressions.front());
+			PUSH_INTO(head, prev->list.front());
 			prev.reset();
 		} else {
 			CONV_TK(prev, Comma);
-			CONV_N(prev, OperExpr, prev->expressions.size());
+			CONV_N(prev, OperExpr, NONE);
 			PUSH_INTO(head, prev);
 		}
 	} else if(
 			((IS_TOKEN(prev, Ident) && IS_CLASS(prev, Start))
-			|| IS_TOKEN(prev, O_RefExpr)
+			|| IS_TOKEN(prev, O_CallExpr)
 			|| IS_TOKEN(prev, O_Dot)
 			|| (IS_TOKEN(prev, Block) && IS_CLASS(prev, BlockExpr))
 			)
@@ -2163,14 +2458,14 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			)
 	) {
 		_DP(ctx.dbg) << "<MakeRef>";
-		auto MAKE_NODE_N_FROM2(block_expr, O_RefExpr, OperExpr, 2, prev, head);
+		auto MAKE_NODE_N_FROM2(block_expr, O_CallExpr, OperExpr, SLOT2, prev, head);
 		PUSH_INTO(block_expr, prev);
 		PUSH_INTO(block_expr, head);
 		prev = std::move(block_expr);
 		return true;
 	} else if(!ctx.terminating
 		&& IS_CLASS(prev, OperExpr) && IS_TOKEN(prev, O_Dot)
-		&& prev->meta_value == 1 && prev->expressions.size() == 0
+		&& prev->slots == ASTSlots::SLOT1 && prev->is_empty()
 		&& (prev->whitespace != WS::NONE)
 		&& (IS_CLASS(head, Start)
 			|| IS_CLASS(head, BlockExpr)
@@ -2178,7 +2473,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			|| (IS_CLASS(head, FuncExpr) && AT_EXPR_TARGET(head))
 	)) {
 		_DP(ctx.dbg) << "<DotNLCv>";
-		prev->meta_value = 0;
+		prev->slots = ASTSlots::NONE;
 		//ctx.terminate();
 		return true;
 	} else if(IS_FULLEXPR(prev) && IS_CLASS(head, RawOper)) {
@@ -2192,20 +2487,20 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			// put oper1 inside oper2
 			//  ex2 push_into ex1
 			CONV(head, OperExpr);
-			PUSH_INTO(head, prev);
+			PUSH_INTO_OPEN(head, prev);
 		} else {
 			// new is higher precedence: (1+2)* => (1+(2*_)) || (1+_) (2*_)
 			//  after: (oper1 OperOpen (value1 Start)) (oper2 OperOpen (value2 Start))
-			// convert both operators to open expressions
+			// convert both operators to open list
 			// ex2back push_into ex1
 			CONV(head, OperExpr);
 			// pop value2 from oper1 push into oper2
-			PUSH_INTO(head, POP_EXPR(prev));
+			PUSH_INTO_OPEN(head, POP_EXPR(prev));
 			// TODO have to decend or collapse the tree at some point
 		}
 	} else if(IS2C(KeywExpr, KeywExpr)) {
 		if(
-			IS_TOKEN(prev, K_Else) && prev->expressions.empty()
+			IS_TOKEN(prev, K_Else) && prev->list.empty()
 			&& IS_TOKEN(head, K_If)
 		) {
 			CONV_TK(head, K_ElseIf);
@@ -2244,6 +2539,9 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		_DP(ctx.dbg) << "<LAH>";
 		if(!ctx.terminating) {
 			//_DP(ctx.dbg) << "\n<collapse_expr before " << head << ">";
+			if(IS_TOKEN(head, K_Else)) {
+				ctx.down_to = Expr::FuncExpr;
+			}
 			ctx.terminate();
 			return true;
 		}
@@ -2267,7 +2565,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 	) {
 		if(IS_TOKEN(head, O_Sub))
 			CONV_TK(head, O_Minus);
-		CONV_N(head, OperExpr, 1);
+		CONV_N(head, OperExpr, SLOT1);
 		_DP(ctx.dbg) << "<DotPfx>";
 		return true;
 	} else if(IS_CLASS(prev, End)) {
@@ -2281,7 +2579,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		)
 		&& IS_TOKEN(head, Comma)
 	) {
-		auto MAKE_NODE_N_FROM2(comma_list, Comma, OperExpr, 0, prev, head);
+		auto MAKE_NODE_N_FROM2(comma_list, Comma, OperExpr, NONE, prev, head);
 		PUSH_INTO(comma_list, prev);
 		prev = std::move(comma_list); // comma_list -> prev
 	} else if(IS_OPENEXPR(prev) && (
@@ -2315,7 +2613,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 	std::vector<std::unique_ptr<ExprStackItem>> block_stack;
 	std::unique_ptr<ExprStackItem> current_block =
 		std::make_unique<ExprStackItem>(ExprStackItem {
-			root_module->source.root_tree.get(), root_module->source.root_tree->expressions
+			root_module->source.root_tree.get(), root_module->source.root_tree->list
 		});
 	bool is_start_expr = false;
 	node_ptr empty;
@@ -2334,23 +2632,24 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 	auto collapse_expr = [&](bool terminating, Expr down_to = Expr::End) {
 		auto &expr_list = current_block->expr_list;
 		// try to collapse the expression list
-		CollapseContext ctx { dbg, current_block, expr_hold, terminating, down_to, false };
+		CollapseContext ctx { dbg, current_block, expr_hold, terminating, down_to, false, false };
 		while(true) {
 			if(expr_list.empty()) break;
 			auto &head = expr_list.back();
 			if( ctx.terminating ) {
 				if(IS_CLASS(head, RawOper) && IS_TOKEN(head, O_Dot)) {
-					CONV_N(head, OperExpr, 0);
-				} else if(IS_OPENEXPR(head) && IS_TOKEN(head, O_Dot)
-					&& head->meta_value == 1
+					CONV_N(head, OperExpr, NONE);
+				} else if(IS_CLASS(head, OperExpr) && IS_TOKEN(head, O_Dot)
+					&& head->is_empty()
+					&& head->slots == ASTSlots::SLOT1
 				) {
-					head->meta_value = 0;
+					head->slots = ASTSlots::NONE;
 					continue;
 				}
 			}
 			if(expr_list.size() == 1) {
 				if(IS_CLASS(head, RawOper) && IS_TOKEN(head, O_Dot)) {
-					CONV_N(head, OperExpr, 1);
+					CONV_N(head, OperExpr, SLOT1);
 				} else if(IS_CLASS(current_block->block, TypeExpr) && IS_CLASS(head, Start)) {
 					CONV(head, TypeStart);
 				}
@@ -2361,7 +2660,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 			auto &third = expr_list.size() >= 3 ? *(expr_list.end() - 3) : empty;
 			//auto &fourth = expr_list.size() >= 4 ? *(expr_list.end() - 4) : empty;
 			//_DL(ctx.dbg) << "|";
-			//_DL(ctx.dbg) << "<|" << prev << "," << head << "|>";
+			_DL(ctx.dbg) << "<|" << prev << "," << head << "|>";
 			bool was_terminating = ctx.terminating;
 			if(!(
 				(ctx.terminating && (
@@ -2371,7 +2670,16 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 				|| parse2nt(ctx, head, prev)
 			)) {
 				clean_list();
-				if(was_terminating || !ctx.terminating || ctx.error)
+				if(was_terminating && expr_hold.size() > 0) {
+					ctx.terminating = false;
+					while(expr_hold.size() > 0) {
+						//_DL(ctx.dbg) << "\n<END collapse_expr before " << expr_hold << ">";
+						expr_list.emplace_back(std::move(expr_hold.back()));
+						expr_hold.pop_back();
+					}
+					if(ctx.held) break;
+					ctx.held = true;
+				} else if(was_terminating || !ctx.terminating || ctx.error)
 					break;
 			} else clean_list();
 			if(ctx.error) break;
@@ -2406,7 +2714,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 			auto ptr_block = block.get();
 			start_expr(std::move(block));
 			block_stack.emplace_back(std::move(current_block));
-			current_block = std::make_unique<ExprStackItem>(ExprStackItem{ptr_block, ptr_block->expressions});
+			current_block = std::make_unique<ExprStackItem>(ExprStackItem{ptr_block, ptr_block->list});
 			current_block->obj_ident = lex_range.token == Token::Object;
 			_DL(dbg) << "(begin block '" << token_string << "' ";
 			show = false;
@@ -2462,7 +2770,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 			break;
 		case Token::Comma: {
 			//terminal_expr();
-			start_expr(std::make_unique<ASTNode>(Token::Comma, Expr::RawOper, 2, lex_range));
+			start_expr(std::make_unique<ASTNode>(Token::Comma, Expr::RawOper, ASTSlots::VAR, lex_range));
 			break;
 		}
 		case Token::Ident: {
@@ -2473,7 +2781,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 					terminal_expr();
 				}
 				start_expr(std::make_unique<ASTNode>(
-					lex_range.token, found->parse_class, found->meta_value, lex_range));
+					lex_range.token, found->parse_class, found->slots, lex_range));
 			} else {
 				_DL(dbg) << "Ident token: \"" << token_string << "\"\n";
 				// definitely not a keyword
@@ -2511,8 +2819,10 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 		case Token::Less:
 		case Token::Xor:
 		case Token::XorDot:
+		case Token::O_XorEq:
 		case Token::LessDot:
 		case Token::LessUnit:
+		case Token::O_Spaceship:
 		case Token::Greater:
 		case Token::GreaterEqual:
 		case Token::GreaterUnit:
@@ -2530,7 +2840,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 			if(found->action == KWA::ObjIdent && current_block->obj_ident) {
 				current_block->obj_ident = false;
 				start_expr(std::make_unique<ASTNode>(
-					Token::Ident, Expr::Start, found->meta_value, lex_range));
+					Token::Ident, Expr::Start, found->slots, lex_range));
 			} else {
 				if(found->action == KWA::ObjAssign
 					&& IS_TOKEN(current_block->block, Object)) {
@@ -2540,9 +2850,13 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 					current_block->obj_ident = false;
 				}
 				start_expr(std::make_unique<ASTNode>(
-					lex_range.token, found->parse_class, found->meta_value, lex_range));
-				_DL(dbg) << "<Op" << uint32_t{found->meta_value} << ":" << lex_range.token << ">";
+					lex_range.token, found->parse_class, found->slots, lex_range));
+				_DL(dbg) << "<Op" << found->slots << ":" << lex_range.token << ">";
 			}
+			break;
+		}
+		case Token::Colon: {
+			start_expr(std::make_unique<ASTNode>(Token::O_Decl, Expr::RawOper, ASTSlots::SLOT2, lex_range));
 			break;
 		}
 		case Token::Semi: {
@@ -2692,6 +3006,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 			break;
 		}
 	}
+	_DL(dbg) << '\n';
 	return true;
 }
 
@@ -2737,7 +3052,8 @@ module_ptr compile_sourcefile(string file_source) {
 	module_ptr root_module =
 		std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(std::cerr, root_module);
-	walk_expression(std::cerr, *root_module.get(), root_module->root_context, root_module->source.root_tree);
+	auto walk = WalkContext{std::cerr, std::cerr, *root_module.get()};
+	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	show_string_table(std::cerr, *root_module);
 	show_scopes(std::cerr, *root_module);
 	return root_module;
@@ -2748,7 +3064,9 @@ module_ptr test_compile_sourcefile(std::ostream &dbg, const string_view file_pat
 	module_ptr root_module =
 		std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(dbg, root_module);
-	walk_expression(dbg, *root_module.get(), root_module->root_context, root_module->source.root_tree);
+	show_source_tree(dbg, root_module->source);
+	auto walk = WalkContext{dbg, dbg, *root_module.get()};
+	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	show_string_table(dbg, *root_module);
 	show_scopes(dbg, *root_module);
 	return root_module;
@@ -2763,7 +3081,8 @@ void ScriptContext::LoadScriptFile(const string_view file_path, const string_vie
 	std::shared_ptr<ModuleContext> root_module =
 		std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(dbg, root_module);
-	walk_expression(dbg, *root_module.get(), root_module->root_context, root_module->source.root_tree);
+	auto walk = WalkContext{dbg, dbg, *root_module.get()};
+	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	this->script_map[string(into_name)] = root_module;
 }
 
