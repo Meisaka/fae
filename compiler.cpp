@@ -520,7 +520,7 @@ static void show_node_open(std::ostream &os, const ASTNode &node) {
 		os << " " << static_cast<uint32_t>(node.precedence);
 	}
 	uint8_t count = node.slot_count();
-	if(node.is_open()) {
+	if(node.open()) {
 		os << "+";
 		if(count == 1 && !node.slot1) os << "S1";
 		else if(count == 2 && !node.slot2) os << "S2";
@@ -810,7 +810,7 @@ struct ExprStackItem {
 				init_expr();
 			} else if(c == '+') {
 				precedence = get_precedence(current_token);
-				meta = ASTNode::slot_open(meta);
+				meta = ASTNode::make_open(meta);
 				begin_tree_node();
 				state = 11;
 			} else if(isdigit(c)) {
@@ -850,7 +850,7 @@ struct ExprStackItem {
 				state = 11;
 			} else if(c == '+') {
 				if(state == 7) precedence = get_precedence(current_token);
-				meta = ASTNode::slot_open(meta);
+				meta = ASTNode::make_open(meta);
 				begin_tree_node();
 				state = 11;
 			} else if(c == ':') {
@@ -914,8 +914,13 @@ std::ostream &operator<<(std::ostream &os, const ASTNode &node) {
 }
 node_ptr POP_EXPR(node_ptr &node) {
 	uint8_t count = node->slot_count();
-	if(count >= 2 && node->slot2) return std::move(node->slot2);
-	if(count >= 1 && node->slot1) return std::move(node->slot1);
+	if(count >= 2 && node->slot2) {
+		if(node->slot1) node->whitespace = node->slot1->whitespace;
+		return std::move(node->slot2);
+	}
+	if(count >= 1 && node->slot1) {
+		return std::move(node->slot1);
+	}
 	if(node->list.empty()) return node_ptr{};
 	auto b = std::move(node->list.back());
 	node->list.pop_back();
@@ -967,7 +972,7 @@ static constexpr void convert_token(auto &n, Token t) noexcept {
 #define EXTEND_TO(t, sl, sr) t->block.tk_begin = sl->block.tk_begin; \
 	t->block.tk_end = sr->block.tk_end; \
 	t->whitespace = sr->whitespace;
-#define AT_EXPR_TARGET(id) !(id)->is_open()
+#define AT_EXPR_TARGET(id) !(id)->open()
 #define IS_TOKEN(n, t) ((n)->ast_token == Token::t)
 #define IS_CLASS(n, c) ((n)->asc == Expr::c)
 #define IS_OPENTYPEEXPR(n) (((n)->asc == Expr::TypeExpr) && !AT_EXPR_TARGET(n))
@@ -1284,6 +1289,77 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			}
 		}
 	};
+	auto generate_oper_expr = [&](const node_ptr &ex) -> bool {
+		switch(ex->ast_token) {
+		case Token::O_Add:
+			ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
+			break;
+		case Token::O_Sub:
+			ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
+			break;
+		case Token::O_Mul:
+			ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
+			break;
+		case Token::O_Div:
+			ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
+			break;
+		case Token::O_Mod:
+			ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
+			break;
+		case Token::O_Power:
+			ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
+			break;
+		case Token::O_And:
+			ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
+			break;
+		case Token::O_Or:
+			ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
+			break;
+		case Token::O_Xor:
+			ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
+			break;
+		case Token::O_RAsh:
+			ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
+			break;
+		case Token::O_Rsh:
+			ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
+			break;
+		case Token::O_Lsh:
+			ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
+			break;
+		case Token::O_Minus:
+			ctx->instructions.emplace_back(Instruction{Opcode::Negate, 0});
+			break;
+		case Token::O_Not:
+			ctx->instructions.emplace_back(Instruction{Opcode::Not, 0});
+			break;
+		case Token::O_Less:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareLess, 0});
+			break;
+		case Token::O_Greater:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareGreater, 0});
+			break;
+		case Token::O_EqEq:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareEqual, 0});
+			break;
+		case Token::O_NotEq:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareNotEqual, 0});
+			break;
+		case Token::O_LessEq:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareLessEqual, 0});
+			break;
+		case Token::O_GreaterEq:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareGreaterEqual, 0});
+			break;
+		case Token::O_Spaceship:
+			ctx->instructions.emplace_back(Instruction{Opcode::CompareSpaceship, 0});
+			break;
+		default:
+			_DW(walk.err) << "unhandled operator: " << expr->ast_token << "\n";
+			return false;
+		}
+		return true;
+	};
 	_DW(walk.dbg) << "Expr:" << expr->ast_token << " ";
 	switch(expr->asc) {
 	case Expr::BlockExpr: {
@@ -1310,67 +1386,57 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		return false;
 	}
 	case Expr::KeywExpr:
-		if(!AT_EXPR_TARGET(expr) && expr->list.size() >= 2) {
+		if(expr->open()) {
 			walk.show_syn_error("Keyword expression", expr);
 			return false;
 		}
 		switch(expr->ast_token) {
 		case Token::K_Mut:
 		case Token::K_Let: {
-			if(expr->list.empty()) {
-				walk.show_syn_error("Let", expr);
-				return false;
-			}
-			auto item = expr->list.front().get();
+			auto item = expr->slot1.get();
 			bool is_mutable = IS_TOKEN(expr, K_Mut);
-			if(IS_TOKEN(item, K_Mut)) {
-				item = item->list.front().get();
+			if(IS_TOKEN(item, K_Mut) && !item->empty()) {
+				item = item->slot1.get();
 				is_mutable = true;
 			}
-			if(AT_EXPR_TARGET(item) && IS_TOKEN(item, O_Assign)) {
-				if(!IS_TOKEN(item->list.front(), Ident)) {
-					walk.show_syn_error("Let assignment expression", item);
-					return false;
-				}
-				size_t string_index = walk.module_ctx.find_or_put_string(
-					item->list.front()->block.as_string() );
-				if(!walk_expression(walk, ctx, item->list[1])) return false;
-				size_t var_index = ctx->current_depth++;
-				size_t decl_index = ctx->var_declarations.size();
-				ctx->var_declarations.emplace_back(VariableDeclaration{string_index, var_index, is_mutable});
-				_DW(walk.err) << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << walk.module_ctx.string_table[string_index] << " = \n";
-				// assign the value
-				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, decl_index});
-				return true;
+			size_t string_index;
+			if(IS_TOKEN(item, O_Decl) && item->slot1 && IS_TOKEN(item->slot1, Ident)) {
+				string_index = walk.module_ctx.find_or_put_string( item->slot1->block.as_string() );
 			} else if(IS_TOKEN(item, Ident)) {
-				size_t string_index = walk.module_ctx.find_or_put_string(item->block.as_string());
-				_DW(walk.err) << "TODO let decl " << "\n";
-				return true;
+				string_index = walk.module_ctx.find_or_put_string( item->block.as_string() );
 			} else {
-				walk.show_syn_error("Let expression", item);
-			}
-			return false;
-		}
-		case Token::K_If: {
-			if(!AT_EXPR_TARGET(expr)) {
-				walk.show_syn_error("If expression", expr);
+				walk.show_syn_error("Let assignment expression", item);
 				return false;
 			}
-			auto walk_expr = expr->list.cbegin();
-			if(!walk_expression(walk, ctx, *walk_expr)) return false;
-			walk_expr++;
+			if(expr->slot2) {
+				if(!walk_expression(walk, ctx, expr->slot2)) return false;
+			}
+			size_t var_index = ctx->current_depth++;
+			size_t decl_index = ctx->var_declarations.size();
+			ctx->var_declarations.emplace_back(VariableDeclaration{string_index, var_index, is_mutable});
+			if(expr->slot2) {
+				// assign the value
+				_DW(walk.err) << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << walk.module_ctx.string_table[string_index] << " = \n";
+				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, decl_index});
+			} else {
+				_DW(walk.err) << "TODO let decl " << "\n";
+			}
+			return true;
+		}
+		case Token::K_If: {
+			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			size_t skip_pos = ctx->instructions.size();
 			ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
-			if(!walk_expression(walk, ctx, *walk_expr)) return false;
-			walk_expr++;
+			if(!walk_expression(walk, ctx, expr->slot2)) return false;
 			std::vector<size_t> exit_positions;
 			bool hanging_elseif = false;
+			auto walk_expr = expr->list.cbegin();
 			if(walk_expr == expr->list.cend()) { // no else or elseif
 				ctx->instructions[skip_pos].param = ctx->instructions.size();
 				//ctx->instructions.emplace_back(Instruction{Opcode::LoadUnit, 0});
 			} else while(walk_expr != expr->list.cend()) {
 				if(IS_TOKEN((*walk_expr), K_ElseIf)) {
-					if((*walk_expr)->list.size() != 2) {
+					if((*walk_expr)->open()) {
 						walk.show_syn_error("ElseIf", *walk_expr);
 						return false;
 					}
@@ -1380,13 +1446,13 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					// fixup the previous test's "else" jump
 					ctx->instructions[skip_pos].param = ctx->instructions.size();
 					// test expression
-					if(!walk_expression(walk, ctx, (*walk_expr)->list[0])) return false;
+					if(!walk_expression(walk, ctx, (*walk_expr)->slot1)) return false;
 					skip_pos = ctx->instructions.size();
 					hanging_elseif = true; // "else" jump exits if no more branches
 					ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
-					if(!walk_expression(walk, ctx, (*walk_expr)->list[1])) return false;
+					if(!walk_expression(walk, ctx, (*walk_expr)->slot2)) return false;
 				} else if(IS_TOKEN((*walk_expr), K_Else)) {
-					if((*walk_expr)->list.size() != 1) {
+					if((*walk_expr)->open()) {
 						walk.show_syn_error("Else", *walk_expr);
 						return false;
 					}
@@ -1396,7 +1462,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
 					// fixup the previous test's "else" jump
 					ctx->instructions[skip_pos].param = ctx->instructions.size();
-					if(!walk_expression(walk, ctx, (*walk_expr)->list[0])) return false;
+					if(!walk_expression(walk, ctx, (*walk_expr)->slot1)) return false;
 					break;
 				} else {
 					walk.show_syn_error("If-Else", *walk_expr);
@@ -1413,19 +1479,12 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			return true;
 		}
 		case Token::K_End: {
-			if(expr->list.empty()) {
-				walk.show_syn_error("end expression", expr);
-			}
-			if(!walk_expression(walk, ctx, expr->list.front())) return false;
+			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			ctx->instructions.emplace_back(Instruction{Opcode::ExitFunction, 0});
 			return true;
 		}
 		case Token::K_Loop: {
-			if(expr->list.size() != 1) {
-				walk.show_syn_error("Loop expression", expr);
-				return false;
-			}
-			auto &inner_expr = expr->list.front();
+			auto &inner_expr = expr->slot1;
 			size_t loop_point = ctx->instructions.size();
 			begin_loop_scope(loop_point);
 			if(!walk_expression(walk, ctx, inner_expr)) return false;
@@ -1438,10 +1497,10 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				return e.loop || false;
 			});
 			if(found == ctx->scopes.cend()) {
-				walk.show_syn_error("Continue without Loop", expr);
+				walk.show_syn_error("Break without Loop", expr);
 				return false;
 			}
-			if(!walk_expression(walk, ctx, expr->list.front())) return false;
+			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			leave_to_scope(found);
 			found->loop->exit_points.push_back(ctx->instructions.size());
 			ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
@@ -1462,22 +1521,14 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		}
 		case Token::K_Until:
 		case Token::K_While: {
-			if(expr->list.size() != 2) {
-				if(IS_TOKEN(expr, K_Until))
-					walk.show_syn_error("Until expression", expr);
-				else walk.show_syn_error("While expression", expr);
-				return false;
-			}
-			auto walk_expr = expr->list.cbegin();
 			size_t loop_point = ctx->instructions.size();
 			begin_loop_scope(loop_point);
-			if(!walk_expression(walk, ctx, *walk_expr)) return false;
-			walk_expr++;
+			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			size_t jump_ins = ctx->instructions.size();
 			if(IS_TOKEN(expr, K_While)) // don't jump to exit
 				ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
 			else ctx->instructions.emplace_back(Instruction{Opcode::JumpIf, 0});
-			if(!walk_expression(walk, ctx, *walk_expr)) return false;
+			if(!walk_expression(walk, ctx, expr->slot2)) return false;
 			_DW(walk.dbg) << "end " << expr->ast_token
 				<< " jump_pos=" << ctx->instructions.size()
 				<< " loop_point=" << loop_point << '\n';
@@ -1505,15 +1556,15 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			return false;
 		}
 		if(IS_TOKEN(expr, O_CallExpr)) { // function calls
-			if(expr->list.size() != 2) {
+			if(expr->open()) {
 				walk.show_syn_error("Function call", expr);
 				return false;
 			}
 			_DW(walk.dbg) << "reference: ";
-			if(!walk_expression(walk, ctx, expr->list[0])) return false;
+			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			_DW(walk.dbg) << "\ncall with: ";
 			// arguments
-			auto &args = expr->list[1];
+			auto &args = expr->slot2;
 			bool func_save = false;
 			size_t arg_count = 0;
 			if(IS_TOKEN(args, Block) && args->list.empty()) {
@@ -1565,14 +1616,12 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			return true;
 		}
 		_DW(walk.dbg) << "operator: " << expr->ast_token;
-		auto expr_itr = expr->list.cbegin();
-		auto expr_end = expr->list.cend();
-		if(IS_TOKEN(expr, O_Dot) && expr->list.size() == 1) {
-			if(!IS_TOKEN(expr->list[0], Ident)) {
+		if(IS_TOKEN(expr, O_Dot) && expr->slots == ASTSlots::SLOT1 && expr->slot1) {
+			if(!IS_TOKEN(expr->slot1, Ident)) {
 				walk.show_syn_error("Dot operator", expr);
 				return false;
 			}
-			auto arg_string = expr->list[0]->block.as_string();
+			auto arg_string = expr->slot1->block.as_string();
 			size_t string_index = walk.module_ctx.find_or_put_string(arg_string);
 			auto search_context = ctx.get();
 			uint32_t up_count = 0;
@@ -1598,10 +1647,10 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				Instruction{Opcode::LoadArg, up_count, arg_index});
 			_DW(walk.dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << up_count << "," << arg_index << "\n";
 			return true;
-		} else if(IS_TOKEN(expr, O_Assign) && expr->list.size() == 2) {
+		} else if(IS_TOKEN(expr, O_Assign) && !expr->open()) {
 			_DW(walk.dbg) << "L ref: ";
-			auto &left_ref = expr->list.front();
-			auto &right_ref = expr->list.back();
+			auto &left_ref = expr->slot1;
+			auto &right_ref = expr->slot2;
 			if(IS_TOKEN(left_ref, Ident)) {
 				// ok! lookup variable
 				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
@@ -1623,7 +1672,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					<< var_pos.value().decl_index << "\n";
 				return true;
 			} else {
-				_DW(walk.err) << "unknown reference type: " << expr->list.front() << '\n';
+				_DW(walk.err) << "unknown reference type: " << expr->slot1 << '\n';
 				return false;
 			}
 		} else if(
@@ -1641,10 +1690,10 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					|| IS_TOKEN(expr, O_RshEq)
 					|| IS_TOKEN(expr, O_Decl)
 				)
-				&& expr->list.size() == 2) {
+				&& !expr->open()) {
 			_DW(walk.dbg) << "L ref: ";
-			auto &left_ref = expr->list.front();
-			auto &right_ref = expr->list.back();
+			auto &left_ref = expr->slot1;
+			auto &right_ref = expr->slot2;
 			if(IS_TOKEN(left_ref, Ident)) {
 				// ok! lookup variable
 				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
@@ -1712,99 +1761,45 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					<< var_pos.value().decl_index << "\n";
 				return true;
 			} else {
-				_DW(walk.err) << "unknown reference type: " << expr->list.front() << '\n';
+				_DW(walk.err) << "unknown reference type: " << expr->slot1 << '\n';
 				return false;
 			}
-		} else if(expr_itr != expr_end) {
+		} else if(expr->slot1 && expr->slot2) {
 			_DW(walk.dbg) << "\nexpr L: ";
-			if(!walk_expression(walk, ctx, *expr_itr)) return false;
-			expr_itr++;
+			if(!walk_expression(walk, ctx, expr->slot1)) return false;
+			if(IS_TOKEN(expr, O_Dot)) {
+				if(!IS_TOKEN(expr->slot2, Ident)) {
+					walk.show_syn_error("Dot operator", expr);
+					return false;
+				}
+				size_t string_index = walk.module_ctx.find_or_put_string(
+					expr->slot2->block.as_string() );
+				ctx->instructions.emplace_back(Instruction{Opcode::NamedLookup, string_index});
+				return true;
+			}
+			_DW(walk.dbg) << "\nexpr R: ";
+			ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+			if(!walk_expression(walk, ctx, expr->slot2)) return false;
+			if(!generate_oper_expr(expr)) return false;
+			return true;
+		} else if(expr->list.size() > 0) {
+			// handle below
 		} else {
 			walk.show_syn_error("unknown operator", expr);
 			return false;
 		}
-		if(IS_TOKEN(expr, O_Dot)) {
-			if(expr->list.size() < 2 || !IS_TOKEN(expr->list[1], Ident)) {
-				walk.show_syn_error("Dot operator", expr);
-				return false;
-			}
-			size_t string_index = walk.module_ctx.find_or_put_string(
-				expr->list[1]->block.as_string() );
-			ctx->instructions.emplace_back(Instruction{Opcode::NamedLookup, string_index});
-			return true;
+		auto expr_itr = expr->list.cbegin();
+		auto expr_end = expr->list.cend();
+		if(expr_itr != expr_end) {
+			_DW(walk.dbg) << "\nexpr L: ";
+			if(!walk_expression(walk, ctx, *expr_itr)) return false;
+			expr_itr++;
 		}
 		while(expr_itr != expr_end) {
-			_DW(walk.dbg) << "\nexpr R: ";
+			_DW(walk.dbg) << "\nexpr I: ";
 			ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
 			if(!walk_expression(walk, ctx, *expr_itr)) return false;
-			switch(expr->ast_token) {
-			case Token::O_Add:
-				ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
-				break;
-			case Token::O_Sub:
-				ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
-				break;
-			case Token::O_Mul:
-				ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
-				break;
-			case Token::O_Div:
-				ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
-				break;
-			case Token::O_Mod:
-				ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
-				break;
-			case Token::O_Power:
-				ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
-				break;
-			case Token::O_And:
-				ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
-				break;
-			case Token::O_Or:
-				ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
-				break;
-			case Token::O_Xor:
-				ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
-				break;
-			case Token::O_RAsh:
-				ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
-				break;
-			case Token::O_Rsh:
-				ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
-				break;
-			case Token::O_Lsh:
-				ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
-				break;
-			case Token::O_Minus:
-				ctx->instructions.emplace_back(Instruction{Opcode::Negate, 0});
-				break;
-			case Token::O_Not:
-				ctx->instructions.emplace_back(Instruction{Opcode::Not, 0});
-				break;
-			case Token::O_Less:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareLess, 0});
-				break;
-			case Token::O_Greater:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareGreater, 0});
-				break;
-			case Token::O_EqEq:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareEqual, 0});
-				break;
-			case Token::O_NotEq:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareNotEqual, 0});
-				break;
-			case Token::O_LessEq:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareLessEqual, 0});
-				break;
-			case Token::O_GreaterEq:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareGreaterEqual, 0});
-				break;
-			case Token::O_Spaceship:
-				ctx->instructions.emplace_back(Instruction{Opcode::CompareSpaceship, 0});
-				break;
-			default:
-				_DW(walk.err) << "unhandled operator: " << expr->ast_token << "\n";
-				return false;
-			}
+			if(!generate_oper_expr(expr)) return false;
 			expr_itr++;
 		}
 		return true;
@@ -1905,7 +1900,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		walk.module_ctx.frames.push_back(function_context);
 		ctx->instructions.emplace_back(Instruction{Opcode::LoadClosure, function_context->frame_index});
 		// expr_args // TODO named argument list for the function declaration
-		auto &expr_args = expr->list[0];
+		auto &expr_args = expr->slot1;
 		if(IS_TOKEN(expr_args, Block)) {
 			_DW(walk.err) << "unknown block function argument type: " << expr_args << '\n';
 			return false;
@@ -1923,17 +1918,17 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					function_context->arg_declarations.size()});
 			}
 		} else {
-			_DW(walk.err) << "unknown function argument type: " << expr->list[0] << '\n';
+			_DW(walk.err) << "unknown function argument type: " << expr_args << '\n';
 			return false;
 		}
-		// expr->list[1] // expression or block forming the function body
-		if(IS_TOKEN(expr->list[1], Block)) {
-			for(auto &walk_node : expr->list[1]->list) {
+		// expr->slot2 // expression or block forming the function body
+		if(IS_TOKEN(expr->slot2, Block)) {
+			for(auto &walk_node : expr->slot2->list) {
 				if(!walk_expression(walk, function_context, walk_node))
 					return false;
 			}
 		} else {
-			if(!walk_expression(walk, function_context, expr->list[1]))
+			if(!walk_expression(walk, function_context, expr->slot2))
 				return false;
 		}
 		_DW(walk.dbg) << "function end\n";
@@ -1989,7 +1984,14 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		}
 		_DP(ctx.dbg) << "<TypeCol>";
 		PUSH_INTO(prev, head);
-	} else if(IS_CLASS(prev, FuncExpr) && prev->is_slot2_open()
+	} else if(!AT_EXPR_TARGET(prev)
+		&& IS_CLASS(prev, OperExpr) && IS_TOKEN(prev, O_Decl)
+		&& (IS_CLASS(head, TypeStart) || IS_FULLTYPEEXPR(head))
+	) {
+		PUSH_INTO(prev, head);
+		_DP(ctx.dbg) << "<DeclMerge>";
+		ctx.terminating = false;
+	} else if(IS_CLASS(prev, FuncExpr) && prev->slot2_open()
 		&& ctx.down_to != Expr::FuncExpr
 		&& (
 			IS_CLASS(head, BlockExpr)
@@ -2020,11 +2022,11 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 					|| IS_TOKEN(head, K_Until)
 		)))
 	) {
-		_DP(ctx.dbg) << "<KeyEx>";
-		if(prev->is_open()) {
+		_DP(ctx.dbg) << "<KeyEx>" << prev << ',' << head << '\n';
+		if(prev->open()) {
 			prev->whitespace = head->whitespace;
 			if(IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut)) {
-				if(IS_TOKEN(head, O_Assign) && prev->is_empty()) {
+				if(IS_TOKEN(head, O_Assign) && prev->empty()) {
 					EXTEND_TO(prev, prev, head);
 					prev->slots = ASTSlots::SLOT2;
 					prev->slot1 = std::move(head->slot1);
@@ -2046,7 +2048,7 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		}
 	} else if(
 		IS_OPENEXPR(prev) && IS_TOKEN(head, O_Dot)
-		&& head->is_empty()
+		&& head->empty()
 		&& head->slots != ASTSlots::NONE
 	) {
 		head->slots = ASTSlots::NONE;
@@ -2163,10 +2165,16 @@ static bool parse2t(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		) {
 			PUSH_INTO(prev, head);
 		} else if(
-			IS_TOKEN(prev, K_Let) && !AT_EXPR_TARGET(prev)
+			IS_TOKEN(prev, K_Let) && prev->empty()
 			&& IS_TOKEN(head, K_Mut) && AT_EXPR_TARGET(head)
 		) {
 			PUSH_INTO(prev, head);
+			auto &mutnode = prev->slot1;
+			if(mutnode->slot2) {
+				prev->slots = ASTSlots::SLOT2;
+				prev->slot2 = std::move(POP_EXPR(mutnode));
+				mutnode->slots = ASTSlots::SLOT1;
+			}
 		} else if(
 			IS_TOKEN(prev, K_If) && AT_EXPR_TARGET(prev)
 			&& (IS_TOKEN(head, K_Else) || IS_TOKEN(head, K_ElseIf))
@@ -2272,13 +2280,13 @@ static bool parse3nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_
 			_DP(ctx.dbg) << "<IfElf*>";
 			PUSH_INTO(third, prev);
 			return true;
-		} else if(IS_TOKEN(prev, K_Else) && prev->is_empty()
+		} else if(IS_TOKEN(prev, K_Else) && prev->empty()
 			&& IS_TOKEN(head, K_If)
 		) {
 			_DP(ctx.dbg) << "<Elf>";
 			prev.reset();
 			CONV_TK(head, K_ElseIf);
-		} else if(IS_TOKEN(third, K_If) && !third->is_open()
+		} else if(IS_TOKEN(third, K_If) && !third->open()
 			&& (third->list.empty() || !IS_TOKEN(third->list.back(), K_Else))
 			&& IS_TOKEN(prev, K_Else) && AT_EXPR_TARGET(prev)
 		) {
@@ -2300,7 +2308,7 @@ static bool parse3nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev, node_
 static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 	auto &expr_list = ctx.current_block->expr_list;
 	if(
-		IS_CLASS(prev, TypeDecl) && prev->is_slot1_open()
+		IS_CLASS(prev, TypeDecl) && prev->slot1_open()
 		&& IS_TOKEN(head, Ident)
 	) {
 		if(IS_CLASS(head, Start)) CONV(head, TypeStart);
@@ -2323,7 +2331,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		_DP(ctx.dbg) << "<TypeTag>";
 	} else if(
 		IS_CLASS(prev, TypeDecl)
-		&& prev->is_slot2_open()
+		&& prev->slot2_open()
 		&& IS_CLASS(head, BlockExpr)
 	) {
 		if(IS_TOKEN(head, Object)) CONV_TK(head, TypeObject);
@@ -2363,12 +2371,19 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		CONV(head, TypeExpr);
 		PUSH_INTO(head, prev);
 		_DP(ctx.dbg) << "\n<TypeOp>";
-	} else if(IS_CLASS(prev, TypeStart) && IS_CLASS(head, RawOper)) {
+	} else if(IS_CLASS(prev, TypeStart) && IS_CLASS(head, RawOper)
+		&& (IS_TOKEN(head, O_Or) || IS_TOKEN(head, O_And))
+	) {
 		if(IS_TOKEN(head, O_Or)) { CONV_TK(head, O_Sum); }
 		else if(IS_TOKEN(head, O_And)) { CONV_TK(head, O_Union); }
 		CONV(head, TypeExpr);
 		PUSH_INTO_OPEN(head, prev);
 		_DP(ctx.dbg) << "\n<TypeOp>";
+	} else if(IS_TOKEN(prev, O_Decl)
+		&& IS_CLASS(head, Start) && IS_TOKEN(head, Ident)
+	) {
+		CONV(head, TypeStart);
+		_DP(ctx.dbg) << "\n<DeclIdent>";
 	} else if(IS_FULLTYPEDECL(prev) && IS_CLASS(head, TypeDecl)) {
 		_DP(ctx.dbg) << "\n<TypeSep>";
 	} else if(IS_CLASS(prev, Start) && !IS_TOKEN(prev, Ident)
@@ -2465,7 +2480,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 		return true;
 	} else if(!ctx.terminating
 		&& IS_CLASS(prev, OperExpr) && IS_TOKEN(prev, O_Dot)
-		&& prev->slots == ASTSlots::SLOT1 && prev->is_empty()
+		&& prev->slots == ASTSlots::SLOT1 && prev->empty()
 		&& (prev->whitespace != WS::NONE)
 		&& (IS_CLASS(head, Start)
 			|| IS_CLASS(head, BlockExpr)
@@ -2520,7 +2535,7 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			ctx.error = true;
 		}
 	} else if(
-		(IS_CLASS(prev, Start)
+		( (IS_CLASS(prev, Start)
 			|| IS_CLASS(prev, BlockExpr)
 			|| (IS_CLASS(prev, FuncExpr) && AT_EXPR_TARGET(prev))
 			|| IS_FULLEXPR(prev)
@@ -2534,13 +2549,18 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			|| IS_CLASS(head, TypeExpr)
 			|| IS_CLASS(head, KeywExpr)
 			|| IS_CLASS(head, BlockExpr)
-			|| IS_FULLEXPR(head))
+			|| IS_FULLEXPR(head)
+		) )
+		|| (IS_CLASS(prev, TypeStart) && IS_CLASS(head, RawOper))
 		) {
 		_DP(ctx.dbg) << "<LAH>";
 		if(!ctx.terminating) {
 			//_DP(ctx.dbg) << "\n<collapse_expr before " << head << ">";
 			if(IS_TOKEN(head, K_Else)) {
 				ctx.down_to = Expr::FuncExpr;
+			}
+			if(IS_CLASS(head, RawOper)) {
+				ctx.down_to = Expr::KeywExpr;
 			}
 			ctx.terminate();
 			return true;
@@ -2590,6 +2610,8 @@ static bool parse2nt(CollapseContext &ctx, node_ptr &head, node_ptr &prev) {
 			_DP(ctx.dbg) << "<TODO Delimiter>";
 			ctx.error = true;
 		} else _DP(ctx.dbg) << "<NOP>";
+	} else if((IS_TOKEN(prev, K_Let) || IS_TOKEN(prev, K_Mut)) && IS_TOKEN(head, O_Decl)) {
+		_DP(ctx.dbg) << "<DeclEnd>";
 	} else {
 		_DP(ctx.dbg) << "\n<<collapse_expr " << ctx.terminating << " unhandled " << prev << ":" << head << ">>";
 		ctx.error = true;
@@ -2640,7 +2662,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 				if(IS_CLASS(head, RawOper) && IS_TOKEN(head, O_Dot)) {
 					CONV_N(head, OperExpr, NONE);
 				} else if(IS_CLASS(head, OperExpr) && IS_TOKEN(head, O_Dot)
-					&& head->is_empty()
+					&& head->empty()
 					&& head->slots == ASTSlots::SLOT1
 				) {
 					head->slots = ASTSlots::NONE;
@@ -2660,7 +2682,7 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 			auto &third = expr_list.size() >= 3 ? *(expr_list.end() - 3) : empty;
 			//auto &fourth = expr_list.size() >= 4 ? *(expr_list.end() - 4) : empty;
 			//_DL(ctx.dbg) << "|";
-			_DL(ctx.dbg) << "<|" << prev << "," << head << "|>";
+			//_DL(ctx.dbg) << "<|" << prev << "," << head << "|>";
 			bool was_terminating = ctx.terminating;
 			if(!(
 				(ctx.terminating && (
@@ -2670,14 +2692,13 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 				|| parse2nt(ctx, head, prev)
 			)) {
 				clean_list();
-				if(was_terminating && expr_hold.size() > 0) {
+				if(!ctx.held && expr_hold.size() > 0) {
 					ctx.terminating = false;
 					while(expr_hold.size() > 0) {
 						//_DL(ctx.dbg) << "\n<END collapse_expr before " << expr_hold << ">";
 						expr_list.emplace_back(std::move(expr_hold.back()));
 						expr_hold.pop_back();
 					}
-					if(ctx.held) break;
 					ctx.held = true;
 				} else if(was_terminating || !ctx.terminating || ctx.error)
 					break;

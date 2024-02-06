@@ -1,0 +1,14 @@
+(Block BlockExpr 0
+  (K_Let KeywExpr NL 0
+    A:(K_Mut KeywExpr SP 0
+      A:(O_Decl OperExpr SP
+        :(Ident Start SP "a")
+        :(O_Sum TypeExpr SP
+          :(Ident TypeStart SP "i32")
+          :(Ident TypeStart SP "string")
+        )
+      )
+    )
+    B:(Zero Start NL "0")
+  )
+)

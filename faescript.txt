@@ -24,9 +24,8 @@ namespaces
 	import
 	export
 
-type grammar after the ":"
-	type checking on operators (during compile maybe?)
-	variant type
+type checking on operators (during compile maybe?)
+variant type
 array blocks
 ranges:
 	add parser tests for this
@@ -43,6 +42,8 @@ optimizations:
 	mutable variable (keep on stack, or skip reload if in register)
 	constant folding (and other similar operations)
 	tail calls (a call at the end of a function, or: "end" function_call )
+	static control flow path detection and constant path folding
+	dead code elimination
 
 comments:
 	// line

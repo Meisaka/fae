@@ -48,30 +48,30 @@ struct ASTNode {
 	node_ptr slot1;
 	node_ptr slot2;
 	expr_list_t list;
-	bool is_open() const {
+	bool open() const {
 		uint8_t flags = static_cast<uint8_t>(slots);
 		if(flags & 1) return true;
 		uint8_t count = (flags & static_cast<uint8_t>(ASTSlots::SLOTSMASK)) >> 1;
 		return (count > 0 && !slot1) || (count > 1 && !slot2);
 	}
-	bool is_slot1_open() const {
+	bool slot1_open() const {
 		return (slot_count() > 0 && !slot1);
 	}
-	bool is_slot2_open() const {
+	bool slot2_open() const {
 		return (slot_count() > 1 && slot1 && !slot2);
 	}
-	bool is_empty() const {
+	bool empty() const {
 		return !slot1 && !slot2 && list.empty();
 	}
 
-	static ASTSlots slot_open(ASTSlots s) {
+	static ASTSlots make_open(ASTSlots s) {
 		return static_cast<ASTSlots>(static_cast<uint8_t>(s) | 1);
 	}
 	uint8_t slot_count() const {
 		return static_cast<uint8_t>(slots) >> 1;
 	}
 	void mark_open() {
-		slots = slot_open(slots);
+		slots = make_open(slots);
 	}
 	void mark_closed() {
 		slots = static_cast<ASTSlots>(static_cast<uint8_t>(slots) & 6);
