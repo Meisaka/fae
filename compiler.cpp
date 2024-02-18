@@ -1027,11 +1027,11 @@ std::ostream &operator<<(std::ostream &os, const Variable &v) {
 }
 
 #define DEF_OPCODES(f) \
-	f(LoadConst) f(LoadBool) f(LoadClosed) f(LoadString) \
-	f(LoadVariable) f(StoreVariable) \
-	f(LoadLocal) f(NamedArgLookup) f(NamedLookup) \
-	f(LoadClosure) f(AssignLocal) f(AssignClosed) f(AssignNamed) f(LoadUnit) \
-	f(PushRegister) f(PopRegister) f(LoadStack) f(StoreStack) f(PopStack) \
+	f(LoadUnit) f(LoadConst) f(LoadBool) f(LoadString) f(LoadClosure) \
+	f(LoadVariable) f(StoreVariable) f(LoadArg) f(StoreArg) \
+	f(LoadLocal) f(StoreLocal) f(LoadStack) f(StoreStack) \
+	f(NamedArgLookup) f(NamedLookup) f(AssignNamed) \
+	f(PushRegister) f(PopRegister) f(PopStack) \
 	f(CallExpression) f(ExitScope) f(ExitFunction) \
 	f(Jump) f(JumpIf) f(JumpElse) \
 	f(AddInteger) f(SubInteger) f(MulInteger) f(DivInteger) f(ModInteger) f(PowInteger) \
@@ -1081,16 +1081,16 @@ struct FrameContext;
 
 struct VariableDeclaration {
 	size_t name_index;
-	uint32_t pos;
 	bool is_closed;
+	bool is_arg;
 	bool is_mut;
-	VariableDeclaration(size_t n, size_t p) :
-		name_index{n}, pos{static_cast<uint32_t>(p)}, is_closed{false}, is_mut{false} {}
-	VariableDeclaration(size_t n, size_t p, bool m) :
-		name_index{n}, pos{static_cast<uint32_t>(p)}, is_closed{false}, is_mut{m} {}
+	VariableDeclaration(size_t n, bool arg) :
+		name_index{n}, is_closed{false}, is_arg{arg}, is_mut{false} {}
+	VariableDeclaration(size_t n, bool arg, bool m) :
+		name_index{n}, is_closed{false}, is_arg{arg}, is_mut{m} {}
 };
 std::ostream &operator<<(std::ostream &os, const VariableDeclaration &v) {
-	os << "Decl{" << (v.is_mut ? "mut " : "") << v.name_index << "[" << v.pos << "]}";
+	os << "Decl{" << (v.is_mut ? "mut " : "") << v.name_index << "}";
 	return os;
 }
 
@@ -1107,21 +1107,27 @@ struct FrameScopeContext {
 struct FrameContext {
 	std::shared_ptr<FrameContext> up;
 	size_t frame_index;
-	uint32_t closed_depth;
+	size_t current_closed;
 	size_t current_depth;
 	size_t current_var;
+	std::vector<VariableDeclaration> closed_declarations;
 	std::vector<VariableDeclaration> var_declarations;
 	std::vector<VariableDeclaration> arg_declarations;
 	std::vector<FrameScopeContext> scopes;
 	std::vector<Instruction> instructions;
-	FrameContext(size_t scope_id) : frame_index{scope_id}, closed_depth{0}, current_depth{0}, current_var{0} {}
+	FrameContext(size_t scope_id) : frame_index{scope_id}, current_closed{0}, current_depth{0}, current_var{0} {}
 	FrameContext(size_t scope_id, std::shared_ptr<FrameContext> &up_ptr)
-		: frame_index{scope_id}, up{up_ptr}, closed_depth{0}, current_depth{0}, current_var{0} {}
+		: frame_index{scope_id}, up{up_ptr}, current_closed{0}, current_depth{0}, current_var{0} {}
 };
 typedef std::shared_ptr<FrameContext> framectx_ptr;
+struct VariableExtern {
+	string var_name;
+	uint32_t pos;
+};
 struct ModuleContext {
 	ModuleSource source;
 	std::vector<size_t> line_positions;
+	std::vector<std::unique_ptr<VariableExtern>> imports;
 	std::vector<std::string_view> string_table;
 	std::shared_ptr<FrameContext> root_context;
 	std::vector<std::shared_ptr<FrameContext>> frames;
@@ -1137,6 +1143,17 @@ struct ModuleContext {
 		}
 		this->string_table.push_back(s);
 		return this->string_table.size() - 1; // newly inserted string
+	}
+	void add_import(string import_name) {
+		imports.emplace_back(std::make_unique<VariableExtern>(VariableExtern{import_name, 0}));
+		auto import_ptr = imports.back().get();
+		auto string_index = find_or_put_string(string_view(import_ptr->var_name));
+		auto found = std::ranges::find_if(root_context->closed_declarations,
+			[&](const auto &v) { return !v.is_arg && v.name_index == string_index; });
+		if(found == root_context->closed_declarations.cend()) {
+			root_context->closed_declarations.emplace_back(
+				VariableDeclaration{ string_index, false, false });
+		}
 	}
 };
 
@@ -1253,9 +1270,19 @@ struct WalkContext {
 		auto search_context = ctx.get();
 		while(search_context != nullptr) {
 			auto found = std::ranges::find(search_context->var_declarations, string_index, &VariableDeclaration::name_index);
-			if(found != search_context->var_declarations.cend()) {
+			if(up_count > 0 && pass1() && found != search_context->var_declarations.cend()) {
+				(*found).is_closed = true;
+				search_context->closed_declarations.push_back(*found);
+				search_context->var_declarations.erase(found);
+			} else if(found != search_context->var_declarations.cend()) {
 				// found variable case
 				decl_index = static_cast<uint32_t>(found - search_context->var_declarations.cbegin());
+				return std::optional(variable_pos{up_count, decl_index, *found});
+			}
+			found = std::ranges::find_if(search_context->closed_declarations, [&](const auto &v) { return !v.is_arg && v.name_index == string_index; });
+			if(found != search_context->closed_declarations.cend()) {
+				// found closed variable case
+				decl_index = static_cast<uint32_t>(found - search_context->closed_declarations.cbegin());
 				return std::optional(variable_pos{up_count, decl_index, *found});
 			}
 			search_context = search_context->up.get();
@@ -1274,9 +1301,21 @@ struct WalkContext {
 				_DW(dbg) << "Arg: " << a << '\n';
 			}
 			auto found = std::ranges::find(search_context->arg_declarations, string_index, &VariableDeclaration::name_index);
-			if(found != search_context->arg_declarations.cend()) {
-				// found variable case
-				decl_index = static_cast<uint32_t>(found - search_context->arg_declarations.cbegin());
+			if(found != search_context->arg_declarations.cend() && !(*found).is_closed) {
+				// found argument case
+				if(up_count > 0 && pass1()) {
+					found->is_closed = true;
+					search_context->closed_declarations.push_back(*found);
+					return std::optional(variable_pos{up_count, 0, *found});
+				} else {
+					decl_index = static_cast<uint32_t>(found - search_context->arg_declarations.cbegin());
+					return std::optional(variable_pos{up_count, decl_index, *found});
+				}
+			}
+			found = std::ranges::find_if(search_context->closed_declarations, [&](const auto &v) { return v.is_arg && v.name_index == string_index; });
+			if(found != search_context->closed_declarations.cend()) {
+				// found closed argument case
+				decl_index = static_cast<uint32_t>(found - search_context->closed_declarations.cbegin());
 				return std::optional(variable_pos{up_count, decl_index, *found});
 			}
 			search_context = search_context->up.get();
@@ -1453,17 +1492,23 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				if(!walk_expression(walk, ctx, expr->slot2)) return false;
 			}
 			if(walk.pass1()) {
-				ctx->var_declarations.emplace_back(VariableDeclaration{ string_index, ctx->current_depth, is_mutable });
-			}
-			auto &var_ref = ctx->var_declarations[ctx->current_var];
-			ctx->current_var++;
-			ctx->current_depth++;
-			if(expr->slot2) {
-				// assign the value
-				_DW(walk.err) << "let " << (is_mutable ? "mut " : "") << "decl " << var_ref << " " << str_table(string_index) << " = \n";
-				ins(Instruction{Opcode::AssignLocal, var_ref.pos});
+				ctx->var_declarations.emplace_back(VariableDeclaration{ string_index, false, is_mutable });
+				ctx->current_var++;
+				ctx->current_depth++;
 			} else {
-				_DW(walk.err) << "TODO let decl " << "\n";
+				auto var_ref = walk.get_var_ref(ctx, string_index);
+				if(!var_ref.has_value()) return false;
+				if(!var_ref->decl_ref.is_closed) {
+					ctx->current_var++;
+					ctx->current_depth++;
+				}
+				if(expr->slot2) {
+					// assign the value
+					_DW(walk.err) << "let decl " << var_ref->decl_ref << " " << str_table(string_index) << " = \n";
+					ins(Instruction{var_ref->decl_ref.is_closed ? Opcode::StoreVariable : Opcode::StoreLocal, var_ref->up_count, var_ref->decl_index});
+				} else {
+					_DW(walk.err) << "TODO let fwd decl " << "\n";
+				}
 			}
 			return true;
 		}
@@ -1659,7 +1704,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		} else if(IS_TOKEN(expr, O_Dot) && expr->slots == ASTSlots::NONE) {
 			_DW(walk.dbg) << "Load primary argument(s) operator" << '\n';
 			if(walk.pass1() && ctx->arg_declarations.empty()) {
-				ctx->arg_declarations.emplace_back(VariableDeclaration{0, 0, false});
+				ctx->arg_declarations.emplace_back(VariableDeclaration{0, true});
 			}
 			ins(Instruction{Opcode::LoadLocal, 0, 0});
 			return true;
@@ -1675,22 +1720,8 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			_DW(walk.dbg) << "CTX:" << ctx << '\n';
 			auto var_pos = walk.get_arg_ref(ctx, string_index);
 			if(!var_pos.has_value()) return false;
-			/* stack:  closed:
-			* 0 arg
-			* 1 arg -> 0 var
-			* 2 arg
-			* 3 var
-			* ***** -> 1 var
-			* 4 var
-			* 5 temp
-			*/
-			// found variable case
-			// TODO
-			if(walk.pass1() && var_pos->up_count > 0) {
-				var_pos->decl_ref.is_closed = true;
-			}
-			ins(Instruction{Opcode::LoadLocal, var_pos->up_count, var_pos->decl_ref.pos});
-			_DW(walk.dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << var_pos->up_count << "," << var_pos->decl_ref.pos << "\n";
+			ins(Instruction{var_pos->decl_ref.is_closed ? Opcode::LoadVariable : Opcode::LoadArg, var_pos->up_count, var_pos->decl_index});
+			_DW(walk.dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << var_pos->up_count << "," << var_pos->decl_index << '\n';
 			return true;
 		} else if(IS_TOKEN(expr, O_Assign) && !expr->open()) {
 			_DW(walk.dbg) << "L ref: ";
@@ -1701,16 +1732,18 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
 				auto var_pos = walk.get_var_ref(ctx, string_index);
 				if(!var_pos.has_value()) return false;
-				if(!var_pos.value().decl_ref.is_mut) {
+				if(!var_pos->decl_ref.is_mut) {
 					_DW(walk.err) << "write to immutable variable: " << str_table(string_index) << '\n';
 					return false;
 				}
 				if(!walk_expression(walk, ctx, right_ref)) return false;
-				ins(Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				ins(Instruction{
+					var_pos->decl_ref.is_closed ? Opcode::StoreVariable : Opcode::StoreLocal,
+					var_pos->up_count, var_pos->decl_index});
 				_DW(walk.dbg) << "store variable [" << string_index << "]" <<
 					str_table(string_index) << "->"
-					<< var_pos.value().up_count << ","
-					<< var_pos.value().decl_index << "\n";
+					<< var_pos->up_count << ","
+					<< var_pos->decl_index << "\n";
 				return true;
 			} else {
 				_DW(walk.err) << "unknown reference type: " << expr->slot1 << '\n';
@@ -1747,15 +1780,17 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					_DW(walk.err) << "variable not found: " << str_table(string_index) << "\n";
 					return false;
 				}
-				if(!var_pos.value().decl_ref.is_mut) {
+				if(!var_pos->decl_ref.is_mut) {
 					_DW(walk.err) << "write to immutable variable: " << str_table(string_index) << '\n';
 					return false;
 				}
-				ins(Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				ins(Instruction{
+					var_pos->decl_ref.is_closed ? Opcode::LoadVariable : Opcode::LoadLocal,
+					var_pos->up_count, var_pos->decl_index});
 				_DW(walk.dbg) << "load variable [" << string_index  << "]" <<
 					str_table(string_index) << "->"
-					<< var_pos.value().up_count << ","
-					<< var_pos.value().decl_index << "\n";
+					<< var_pos->up_count << ","
+					<< var_pos->decl_index << "\n";
 				ins(Instruction{Opcode::PushRegister, 0});
 				if(!walk_expression(walk, ctx, right_ref)) return false;
 				switch(expr->ast_token) {
@@ -1908,11 +1943,13 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			if(!var_pos.has_value()) {
 				return false;
 			}
-			ins(Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
+			ins(Instruction{
+				var_pos->decl_ref.is_closed ? Opcode::LoadVariable : Opcode::LoadLocal,
+				var_pos->up_count, var_pos->decl_index});
 			_DW(walk.dbg) << "load variable [" << string_index  << "]" <<
 				expr->block.as_string() << "->"
-				<< var_pos.value().up_count << ","
-				<< var_pos.value().decl_index << "\n";
+				<< var_pos->up_count << ","
+				<< var_pos->decl_index << "\n";
 			return true;
 		}
 		case Token::String: {
@@ -1932,7 +1969,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		}
 		return false;
 	case Expr::End: {
-		ins(Instruction{Opcode::LoadUnit, 0});
+		//ins(Instruction{Opcode::LoadUnit, 0});
 		return true;
 	}
 	case Expr::FuncExpr: {
@@ -1966,8 +2003,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					auto string_index =
 						walk.module_ctx.find_or_put_string(arg->block.as_string());
 					function_context->arg_declarations.emplace_back(
-						VariableDeclaration{string_index,
-						function_context->arg_declarations.size()});
+						VariableDeclaration{string_index, true});
 				}
 			}
 		} else {
@@ -3114,8 +3150,7 @@ void show_source_tree(std::ostream &out, const ModuleSource &source) {
 module_ptr test_parse_sourcefile(std::ostream &dbg, const string_view file_path) {
 	std::string file_source;
 	if(!LoadFileV(file_path, file_source)) return nullptr;
-	std::shared_ptr<ModuleContext> root_module =
-		std::make_shared<ModuleContext>(std::move(file_source));
+	module_ptr root_module = std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(dbg, root_module);
 	return std::move(root_module);
 }
@@ -3123,8 +3158,7 @@ ModuleSource& get_source(const module_ptr &module) {
 	return module->source;
 }
 module_ptr compile_sourcefile(string file_source) {
-	module_ptr root_module =
-		std::make_shared<ModuleContext>(std::move(file_source));
+	module_ptr root_module = std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(std::cerr, root_module);
 	auto walk = WalkContext{std::cerr, std::cerr, *root_module.get()};
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
@@ -3138,15 +3172,19 @@ module_ptr compile_sourcefile(string file_source) {
 module_ptr test_compile_sourcefile(std::ostream &dbg, const string_view file_path) {
 	std::string file_source;
 	if(!LoadFileV(file_path, file_source)) return nullptr;
-	module_ptr root_module =
-		std::make_shared<ModuleContext>(std::move(file_source));
+	module_ptr root_module = std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(dbg, root_module);
 	show_source_tree(dbg, root_module->source);
 	auto walk = WalkContext{dbg, dbg, *root_module.get()};
+	dbg << "^ Complete:\n";
+	root_module->add_import("sys");
+	root_module->add_import("io");
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	walk.pass_reset();
 	walk.pass2 = true;
+	dbg << "^ Pass 2:\n";
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
+	dbg << "^ Result:\n";
 	show_string_table(dbg, *root_module);
 	show_scopes(dbg, *root_module);
 	return root_module;
@@ -3158,8 +3196,7 @@ void ScriptContext::LoadScriptFile(const string_view file_path, const string_vie
 	auto &dbg = dbg_file;
 	std::string file_source;
 	if(!LoadFileV(file_path, file_source)) return;
-	std::shared_ptr<ModuleContext> root_module =
-		std::make_shared<ModuleContext>(std::move(file_source));
+	module_ptr root_module = std::make_shared<ModuleContext>(std::move(file_source));
 	parse_source(dbg, root_module);
 	auto walk = WalkContext{dbg, dbg, *root_module.get()};
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
@@ -3522,7 +3559,7 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 			show_accum();
 			break;
 		}
-		case Opcode::AssignLocal: {
+		case Opcode::StoreLocal: {
 			uint32_t pos = ins->param_a;
 			dbg << "assign local variable: [" << pos << "]" << '\n';
 			if(pos == current_frame->value_stack.size()) {
