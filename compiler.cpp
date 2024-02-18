@@ -12,7 +12,7 @@
 #include <assert.h>
 #include "script.hpp"
 
-#define DEBUG_LEXPARSE 1
+#define DEBUG_LEXPARSE 0
 #define DEBUG_WALK
 //#define DEBUG_PARSE
 
@@ -1029,7 +1029,7 @@ std::ostream &operator<<(std::ostream &os, const Variable &v) {
 #define DEF_OPCODES(f) \
 	f(LoadConst) f(LoadBool) f(LoadClosed) f(LoadString) \
 	f(LoadVariable) f(StoreVariable) \
-	f(LoadArg) f(NamedArgLookup) f(NamedLookup) \
+	f(LoadLocal) f(NamedArgLookup) f(NamedLookup) \
 	f(LoadClosure) f(AssignLocal) f(AssignClosed) f(AssignNamed) f(LoadUnit) \
 	f(PushRegister) f(PopRegister) f(LoadStack) f(StoreStack) f(PopStack) \
 	f(CallExpression) f(ExitScope) f(ExitFunction) \
@@ -1082,11 +1082,12 @@ struct FrameContext;
 struct VariableDeclaration {
 	size_t name_index;
 	uint32_t pos;
+	bool is_closed;
 	bool is_mut;
 	VariableDeclaration(size_t n, size_t p) :
-		name_index{n}, pos{static_cast<uint32_t>(p)} {}
+		name_index{n}, pos{static_cast<uint32_t>(p)}, is_closed{false}, is_mut{false} {}
 	VariableDeclaration(size_t n, size_t p, bool m) :
-		name_index{n}, pos{static_cast<uint32_t>(p)}, is_mut{m} {}
+		name_index{n}, pos{static_cast<uint32_t>(p)}, is_closed{false}, is_mut{m} {}
 };
 std::ostream &operator<<(std::ostream &os, const VariableDeclaration &v) {
 	os << "Decl{" << (v.is_mut ? "mut " : "") << v.name_index << "[" << v.pos << "]}";
@@ -1106,15 +1107,18 @@ struct FrameScopeContext {
 struct FrameContext {
 	std::shared_ptr<FrameContext> up;
 	size_t frame_index;
+	uint32_t closed_depth;
+	size_t current_depth;
+	size_t current_var;
 	std::vector<VariableDeclaration> var_declarations;
 	std::vector<VariableDeclaration> arg_declarations;
-	size_t current_depth;
 	std::vector<FrameScopeContext> scopes;
 	std::vector<Instruction> instructions;
-	FrameContext(size_t scope_id) : frame_index{scope_id}, current_depth{0} {}
+	FrameContext(size_t scope_id) : frame_index{scope_id}, closed_depth{0}, current_depth{0}, current_var{0} {}
 	FrameContext(size_t scope_id, std::shared_ptr<FrameContext> &up_ptr)
-		: frame_index{scope_id}, up{up_ptr}, current_depth{0} {}
+		: frame_index{scope_id}, up{up_ptr}, closed_depth{0}, current_depth{0}, current_var{0} {}
 };
+typedef std::shared_ptr<FrameContext> framectx_ptr;
 struct ModuleContext {
 	ModuleSource source;
 	std::vector<size_t> line_positions;
@@ -1209,6 +1213,21 @@ struct WalkContext {
 	std::ostream &dbg;
 	std::ostream &err;
 	ModuleContext &module_ctx;
+	uint32_t current_frame_index;
+	bool pass2;
+	WalkContext(std::ostream &debug_stream, std::ostream &error_stream, ModuleContext &module)
+		: dbg{debug_stream}, err{error_stream}, module_ctx{module},
+			pass2{false}, current_frame_index{0}
+	{}
+	void pass_reset() {
+		current_frame_index = 1;
+		for(auto &frame : module_ctx.frames) {
+			frame->current_var = 0;
+		}
+	}
+	bool pass1() {
+		return !pass2;
+	}
 	void show_position(std::ostream &out, const LexTokenRange &block) {
 		auto file_start = module_ctx.source.source.cbegin();
 		size_t offset = block.tk_begin - file_start;
@@ -1229,24 +1248,42 @@ struct WalkContext {
 		_DW(err) << node->block.as_string() << "\n";
 	}
 	auto get_var_ref(std::shared_ptr<FrameContext> &ctx, const size_t string_index) {
-		auto search_context = ctx.get();
 		uint32_t up_count = 0;
 		uint32_t decl_index = 0;
-		for(;;) {
-			if(search_context == nullptr) {
-				_DW(err) << "variable not found: " << module_ctx.string_table[string_index] << "\n";
-				return std::optional<variable_pos>();
-			}
+		auto search_context = ctx.get();
+		while(search_context != nullptr) {
 			auto found = std::ranges::find(search_context->var_declarations, string_index, &VariableDeclaration::name_index);
-			if(found == search_context->var_declarations.cend()) {
-				search_context = search_context->up.get();
-				up_count++;
-				continue;
+			if(found != search_context->var_declarations.cend()) {
+				// found variable case
+				decl_index = static_cast<uint32_t>(found - search_context->var_declarations.cbegin());
+				return std::optional(variable_pos{up_count, decl_index, *found});
 			}
-			// found variable case
-			decl_index = static_cast<uint32_t>(found - search_context->var_declarations.cbegin());
-			return std::optional(variable_pos{up_count, decl_index, *found});
+			search_context = search_context->up.get();
+			up_count++;
 		}
+		_DW(err) << "variable not found: " << module_ctx.string_table[string_index] << "\n";
+		return std::optional<variable_pos>();
+	};
+	auto get_arg_ref(std::shared_ptr<FrameContext> &ctx, const size_t string_index) {
+		uint32_t up_count = 0;
+		uint32_t decl_index = 0;
+		auto search_context = ctx.get();
+		while(search_context != nullptr) {
+			_DW(dbg) << "Func: " << search_context->frame_index << '\n';
+			for(auto &a : search_context->arg_declarations) {
+				_DW(dbg) << "Arg: " << a << '\n';
+			}
+			auto found = std::ranges::find(search_context->arg_declarations, string_index, &VariableDeclaration::name_index);
+			if(found != search_context->arg_declarations.cend()) {
+				// found variable case
+				decl_index = static_cast<uint32_t>(found - search_context->arg_declarations.cbegin());
+				return std::optional(variable_pos{up_count, decl_index, *found});
+			}
+			search_context = search_context->up.get();
+			up_count++;
+		}
+		_DW(err) << "argument not found: " << module_ctx.string_table[string_index] << "\n";
+		return std::optional<variable_pos>();
 	};
 };
 bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, const node_ptr &expr) {
@@ -1262,97 +1299,100 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			std::make_unique<LoopContext>( ins_pos_reloop )
 		});
 	};
+	auto ins = [&](Instruction &&i) {
+		if(walk.pass2) ctx->instructions.emplace_back(std::move(i));
+	};
 	auto end_scope = [&]() {
 		if(ctx->scopes.empty()) return;
-		auto &scope = ctx->scopes.back();
-		if(scope.loop) {
-			size_t end_pos = ctx->instructions.size();
-			for(auto point : scope.loop->exit_points) {
-				ctx->instructions[point].param = end_pos;
+		if(walk.pass2) {
+			auto &scope = ctx->scopes.back();
+			if(scope.loop) {
+				size_t end_pos = ctx->instructions.size();
+				for(auto point : scope.loop->exit_points) {
+					ctx->instructions[point].param = end_pos;
+				}
 			}
+			if(scope.depth != ctx->current_depth)
+				ins(Instruction{Opcode::ExitScope, scope.depth});
 		}
-		if(scope.depth != ctx->current_depth)
-			ctx->instructions.emplace_back(Instruction{Opcode::ExitScope, scope.depth});
 		ctx->scopes.pop_back();
 	};
 	auto leave_to_scope = [&](auto scope_itr) {
+		if(!walk.pass2) return;
 		auto end_itr = ctx->scopes.end();
 		auto search_itr = end_itr;
 		size_t leave_depth = scope_itr->depth;
 		while(search_itr != scope_itr) {
 			search_itr--;
 			if(search_itr->depth != leave_depth) {
-				ctx->instructions.emplace_back(
-					Instruction{Opcode::ExitScope,
-					search_itr->depth}
-				);
+				ins(Instruction{Opcode::ExitScope, search_itr->depth});
 			}
 		}
 	};
 	auto generate_oper_expr = [&](const node_ptr &ex) -> bool {
 		switch(ex->ast_token) {
 		case Token::O_Add:
-			ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
+			ins(Instruction{Opcode::AddInteger, 0});
 			break;
 		case Token::O_Sub:
-			ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
+			ins(Instruction{Opcode::SubInteger, 0});
 			break;
 		case Token::O_Mul:
-			ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
+			ins(Instruction{Opcode::MulInteger, 0});
 			break;
 		case Token::O_Div:
-			ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
+			ins(Instruction{Opcode::DivInteger, 0});
 			break;
 		case Token::O_Mod:
-			ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
+			ins(Instruction{Opcode::ModInteger, 0});
 			break;
 		case Token::O_Power:
-			ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
+			ins(Instruction{Opcode::PowInteger, 0});
 			break;
 		case Token::O_And:
-			ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
+			ins(Instruction{Opcode::AndInteger, 0});
 			break;
 		case Token::O_Or:
-			ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
+			ins(Instruction{Opcode::OrInteger, 0});
 			break;
 		case Token::O_Xor:
-			ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
+			ins(Instruction{Opcode::XorInteger, 0});
 			break;
 		case Token::O_RAsh:
-			ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
+			ins(Instruction{Opcode::RSHAInteger, 0});
 			break;
 		case Token::O_Rsh:
-			ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
+			ins(Instruction{Opcode::RSHLInteger, 0});
 			break;
 		case Token::O_Lsh:
-			ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
+			ins(Instruction{Opcode::LSHInteger, 0});
 			break;
 		case Token::O_Minus:
-			ctx->instructions.emplace_back(Instruction{Opcode::Negate, 0});
+			ins(Instruction{Opcode::Negate, 0});
 			break;
 		case Token::O_Not:
-			ctx->instructions.emplace_back(Instruction{Opcode::Not, 0});
+			ins(Instruction{Opcode::Not, 0});
 			break;
 		case Token::O_Less:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareLess, 0});
+			ins(Instruction{Opcode::CompareLess, 0});
 			break;
 		case Token::O_Greater:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareGreater, 0});
+			ins(Instruction{Opcode::CompareGreater, 0});
 			break;
 		case Token::O_EqEq:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareEqual, 0});
+			ins(Instruction{Opcode::CompareEqual, 0});
 			break;
 		case Token::O_NotEq:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareNotEqual, 0});
+			ins(Instruction{Opcode::CompareNotEqual, 0});
 			break;
 		case Token::O_LessEq:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareLessEqual, 0});
+			ins(Instruction{Opcode::CompareLessEqual, 0});
 			break;
 		case Token::O_GreaterEq:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareGreaterEqual, 0});
+			ins(Instruction{Opcode::CompareGreaterEqual, 0});
 			break;
 		case Token::O_Spaceship:
-			ctx->instructions.emplace_back(Instruction{Opcode::CompareSpaceship, 0});
+			ins(Instruction{Opcode::CompareSpaceship, 0});
 			break;
 		default:
 			_DW(walk.err) << "unhandled operator: " << expr->ast_token << "\n";
@@ -1379,7 +1419,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			break;
 		} else if(IS_TOKEN(expr, DotArray)) {
 			_DW(walk.dbg) << "argument lookup end\n";
-			ctx->instructions.emplace_back(Instruction{Opcode::NamedArgLookup});
+			ins(Instruction{Opcode::NamedArgLookup});
 			break;
 		}
 		_DW(walk.err) << "unhandled block type: " << expr->ast_token << '\n';
@@ -1399,25 +1439,29 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				item = item->slot1.get();
 				is_mutable = true;
 			}
-			size_t string_index;
+			std::string_view id;
 			if(IS_TOKEN(item, O_Decl) && item->slot1 && IS_TOKEN(item->slot1, Ident)) {
-				string_index = walk.module_ctx.find_or_put_string( item->slot1->block.as_string() );
+				id = item->slot1->block.as_string();
 			} else if(IS_TOKEN(item, Ident)) {
-				string_index = walk.module_ctx.find_or_put_string( item->block.as_string() );
+				id = item->block.as_string();
 			} else {
 				walk.show_syn_error("Let assignment expression", item);
 				return false;
 			}
+			size_t string_index = walk.module_ctx.find_or_put_string(id);
 			if(expr->slot2) {
 				if(!walk_expression(walk, ctx, expr->slot2)) return false;
 			}
-			size_t var_index = ctx->current_depth++;
-			size_t decl_index = ctx->var_declarations.size();
-			ctx->var_declarations.emplace_back(VariableDeclaration{string_index, var_index, is_mutable});
+			if(walk.pass1()) {
+				ctx->var_declarations.emplace_back(VariableDeclaration{ string_index, ctx->current_depth, is_mutable });
+			}
+			auto &var_ref = ctx->var_declarations[ctx->current_var];
+			ctx->current_var++;
+			ctx->current_depth++;
 			if(expr->slot2) {
 				// assign the value
-				_DW(walk.err) << "let " << (is_mutable ? "mut " : "") << "decl " << ctx->var_declarations.back() << " " << walk.module_ctx.string_table[string_index] << " = \n";
-				ctx->instructions.emplace_back(Instruction{Opcode::AssignLocal, decl_index});
+				_DW(walk.err) << "let " << (is_mutable ? "mut " : "") << "decl " << var_ref << " " << str_table(string_index) << " = \n";
+				ins(Instruction{Opcode::AssignLocal, var_ref.pos});
 			} else {
 				_DW(walk.err) << "TODO let decl " << "\n";
 			}
@@ -1426,30 +1470,32 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		case Token::K_If: {
 			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			size_t skip_pos = ctx->instructions.size();
-			ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
+			ins(Instruction{Opcode::JumpElse, 0});
 			if(!walk_expression(walk, ctx, expr->slot2)) return false;
 			std::vector<size_t> exit_positions;
 			bool hanging_elseif = false;
 			auto walk_expr = expr->list.cbegin();
 			if(walk_expr == expr->list.cend()) { // no else or elseif
-				ctx->instructions[skip_pos].param = ctx->instructions.size();
-				//ctx->instructions.emplace_back(Instruction{Opcode::LoadUnit, 0});
+				if(walk.pass2) ctx->instructions[skip_pos].param = ctx->instructions.size();
+				//ins(Instruction{Opcode::LoadUnit, 0});
 			} else while(walk_expr != expr->list.cend()) {
 				if(IS_TOKEN((*walk_expr), K_ElseIf)) {
 					if((*walk_expr)->open()) {
 						walk.show_syn_error("ElseIf", *walk_expr);
 						return false;
 					}
-					// cause the previous "if" to exit
-					exit_positions.push_back(ctx->instructions.size());
-					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
-					// fixup the previous test's "else" jump
-					ctx->instructions[skip_pos].param = ctx->instructions.size();
+					if(walk.pass2) {
+						// cause the previous "if" to exit
+						exit_positions.push_back(ctx->instructions.size());
+						ins(Instruction{Opcode::Jump, 0});
+						// fixup the previous test's "else" jump
+						ctx->instructions[skip_pos].param = ctx->instructions.size();
+					}
 					// test expression
 					if(!walk_expression(walk, ctx, (*walk_expr)->slot1)) return false;
 					skip_pos = ctx->instructions.size();
 					hanging_elseif = true; // "else" jump exits if no more branches
-					ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
+					ins(Instruction{Opcode::JumpElse, 0});
 					if(!walk_expression(walk, ctx, (*walk_expr)->slot2)) return false;
 				} else if(IS_TOKEN((*walk_expr), K_Else)) {
 					if((*walk_expr)->open()) {
@@ -1457,11 +1503,13 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 						return false;
 					}
 					hanging_elseif = false;
-					// cause the previous "if" to exit
-					exit_positions.push_back(ctx->instructions.size());
-					ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
-					// fixup the previous test's "else" jump
-					ctx->instructions[skip_pos].param = ctx->instructions.size();
+					if(walk.pass2) {
+						// cause the previous "if" to exit
+						exit_positions.push_back(ctx->instructions.size());
+						ins(Instruction{Opcode::Jump, 0});
+						// fixup the previous test's "else" jump
+						ctx->instructions[skip_pos].param = ctx->instructions.size();
+					}
 					if(!walk_expression(walk, ctx, (*walk_expr)->slot1)) return false;
 					break;
 				} else {
@@ -1470,17 +1518,19 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				}
 				walk_expr++;
 			}
-			// fixup the exit points
-			size_t exit_point = ctx->instructions.size();
-			if(hanging_elseif) ctx->instructions[skip_pos].param = exit_point;
-			for(auto pos : exit_positions) {
-				ctx->instructions[pos].param = exit_point;
+			if(walk.pass2) {
+				// fixup the exit points
+				size_t exit_point = ctx->instructions.size();
+				if(hanging_elseif) ctx->instructions[skip_pos].param = exit_point;
+				for(auto pos : exit_positions) {
+					ctx->instructions[pos].param = exit_point;
+				}
 			}
 			return true;
 		}
 		case Token::K_End: {
 			if(!walk_expression(walk, ctx, expr->slot1)) return false;
-			ctx->instructions.emplace_back(Instruction{Opcode::ExitFunction, 0});
+			ins(Instruction{Opcode::ExitFunction, 0});
 			return true;
 		}
 		case Token::K_Loop: {
@@ -1488,22 +1538,22 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			size_t loop_point = ctx->instructions.size();
 			begin_loop_scope(loop_point);
 			if(!walk_expression(walk, ctx, inner_expr)) return false;
-			ctx->instructions.emplace_back(Instruction{Opcode::Jump, loop_point});
+			ins(Instruction{Opcode::Jump, loop_point});
 			end_scope();
 			return true;
 		}
 		case Token::K_Break: {
-			auto found = find_last_if(ctx->scopes, [](const auto &e) -> bool {
-				return e.loop || false;
-			});
+			auto found = find_last_if(ctx->scopes, [](const auto &e) { return e.loop || false; });
 			if(found == ctx->scopes.cend()) {
 				walk.show_syn_error("Break without Loop", expr);
 				return false;
 			}
 			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			leave_to_scope(found);
-			found->loop->exit_points.push_back(ctx->instructions.size());
-			ctx->instructions.emplace_back(Instruction{Opcode::Jump, 0});
+			if(walk.pass2) {
+				found->loop->exit_points.push_back(ctx->instructions.size());
+				ins(Instruction{Opcode::Jump, 0});
+			}
 			return true;
 		}
 		case Token::K_Continue: {
@@ -1515,8 +1565,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				return false;
 			}
 			leave_to_scope(found);
-			ctx->instructions.emplace_back(
-				Instruction{Opcode::Jump, found->loop->loop_pos });
+			ins(Instruction{Opcode::Jump, found->loop->loop_pos });
 			return true;
 		}
 		case Token::K_Until:
@@ -1526,14 +1575,16 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			if(!walk_expression(walk, ctx, expr->slot1)) return false;
 			size_t jump_ins = ctx->instructions.size();
 			if(IS_TOKEN(expr, K_While)) // don't jump to exit
-				ctx->instructions.emplace_back(Instruction{Opcode::JumpElse, 0});
-			else ctx->instructions.emplace_back(Instruction{Opcode::JumpIf, 0});
+				ins(Instruction{Opcode::JumpElse, 0});
+			else ins(Instruction{Opcode::JumpIf, 0});
 			if(!walk_expression(walk, ctx, expr->slot2)) return false;
-			_DW(walk.dbg) << "end " << expr->ast_token
-				<< " jump_pos=" << ctx->instructions.size()
-				<< " loop_point=" << loop_point << '\n';
-			ctx->instructions.emplace_back(Instruction{Opcode::Jump, loop_point});
-			ctx->instructions[jump_ins].param = ctx->instructions.size();
+			if(walk.pass2) {
+				_DW(walk.dbg) << "end " << expr->ast_token
+					<< " jump_pos=" << ctx->instructions.size()
+					<< " loop_point=" << loop_point << '\n';
+				ins(Instruction{Opcode::Jump, loop_point});
+				ctx->instructions[jump_ins].param = ctx->instructions.size();
+			}
 			end_scope();
 			// for(auto &ins : ctx->instructions) _DW(walk.dbg) << ins << '\n';
 			return true;
@@ -1573,46 +1624,44 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			} else if(IS_TOKEN(args, Block) && (args->list.size() == 1)) {
 				func_save = true;
 				auto &arg1 = args->list.front();
-				ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+				ins(Instruction{Opcode::PushRegister, 0});
 				arg_count = 1;
 				if(IS_CLASS(arg1, OperExpr) && IS_TOKEN(arg1, Comma)) {
 					_DW(walk.dbg) << "comma-sep: ";
 					for(auto &comma_arg : arg1->list) {
 						if(!walk_expression(walk, ctx, comma_arg)) return false;
-						ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+						ins(Instruction{Opcode::PushRegister, 0});
 					}
 					arg_count = arg1->list.size();
 					_DW(walk.dbg) << "\nargument count: " << arg_count << '\n';
 				} else {
 					if(!walk_expression(walk, ctx, arg1)) return false;
-					ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+					ins(Instruction{Opcode::PushRegister, 0});
 				}
-				ctx->instructions.emplace_back(Instruction{Opcode::LoadStack, arg_count});
+				ins(Instruction{Opcode::LoadStack, arg_count});
 			} else if(IS_TOKEN(args, Block) && (args->list.size() > 1)) {
 				func_save = true;
-				ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+				ins(Instruction{Opcode::PushRegister, 0});
 				for(auto &arg : args->list) {
 					if(!walk_expression(walk, ctx, arg)) return false;
-					ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+					ins(Instruction{Opcode::PushRegister, 0});
 				}
 				arg_count = args->list.size();
-				ctx->instructions.emplace_back(Instruction{Opcode::LoadStack, arg_count});
+				ins(Instruction{Opcode::LoadStack, arg_count});
 			} else {
 				_DW(walk.err) << "unhandled function call\n";
 				return false;
 			}
-			ctx->instructions.emplace_back(Instruction{Opcode::CallExpression, arg_count});
-			if(func_save)
-				ctx->instructions.emplace_back(Instruction{Opcode::PopStack, 0});
+			ins(Instruction{Opcode::CallExpression, arg_count});
+			if(func_save) ins(Instruction{Opcode::PopStack, 0});
 			_DW(walk.dbg) << "\n";
 			return true;
-		} else if(IS_TOKEN(expr, O_Dot)
-			&& expr->slots == ASTSlots::NONE) {
+		} else if(IS_TOKEN(expr, O_Dot) && expr->slots == ASTSlots::NONE) {
 			_DW(walk.dbg) << "Load primary argument(s) operator" << '\n';
-			if(ctx->arg_declarations.empty()) {
+			if(walk.pass1() && ctx->arg_declarations.empty()) {
 				ctx->arg_declarations.emplace_back(VariableDeclaration{0, 0, false});
 			}
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadArg, 0, 0});
+			ins(Instruction{Opcode::LoadLocal, 0, 0});
 			return true;
 		}
 		_DW(walk.dbg) << "operator: " << expr->ast_token;
@@ -1623,29 +1672,25 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			}
 			auto arg_string = expr->slot1->block.as_string();
 			size_t string_index = walk.module_ctx.find_or_put_string(arg_string);
-			auto search_context = ctx.get();
-			uint32_t up_count = 0;
-			uint32_t arg_index = 0;
-			for(;;) {
-				if(search_context == nullptr) {
-					_DW(walk.err) << "named arg not found: " << arg_string << "\n";
-					return false;
-				}
-				auto found = std::ranges::find(
-					search_context->arg_declarations, string_index,
-					&VariableDeclaration::name_index);
-				if(found == search_context->arg_declarations.cend()) {
-					search_context = search_context->up.get();
-					up_count++;
-					continue;
-				}
-				// found variable case
-				arg_index = static_cast<uint32_t>(found - search_context->arg_declarations.cbegin());
-				break;
+			_DW(walk.dbg) << "CTX:" << ctx << '\n';
+			auto var_pos = walk.get_arg_ref(ctx, string_index);
+			if(!var_pos.has_value()) return false;
+			/* stack:  closed:
+			* 0 arg
+			* 1 arg -> 0 var
+			* 2 arg
+			* 3 var
+			* ***** -> 1 var
+			* 4 var
+			* 5 temp
+			*/
+			// found variable case
+			// TODO
+			if(walk.pass1() && var_pos->up_count > 0) {
+				var_pos->decl_ref.is_closed = true;
 			}
-			ctx->instructions.emplace_back(
-				Instruction{Opcode::LoadArg, up_count, arg_index});
-			_DW(walk.dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << up_count << "," << arg_index << "\n";
+			ins(Instruction{Opcode::LoadLocal, var_pos->up_count, var_pos->decl_ref.pos});
+			_DW(walk.dbg) << "load named arg [" << string_index  << "]" << arg_string << "->" << var_pos->up_count << "," << var_pos->decl_ref.pos << "\n";
 			return true;
 		} else if(IS_TOKEN(expr, O_Assign) && !expr->open()) {
 			_DW(walk.dbg) << "L ref: ";
@@ -1655,17 +1700,13 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				// ok! lookup variable
 				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
 				auto var_pos = walk.get_var_ref(ctx, string_index);
-				if(!var_pos.has_value()) {
-					_DW(walk.err) << "variable not found: " << str_table(string_index) << "\n";
-					return false;
-				}
+				if(!var_pos.has_value()) return false;
 				if(!var_pos.value().decl_ref.is_mut) {
 					_DW(walk.err) << "write to immutable variable: " << str_table(string_index) << '\n';
 					return false;
 				}
 				if(!walk_expression(walk, ctx, right_ref)) return false;
-				ctx->instructions.emplace_back(
-					Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				ins(Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
 				_DW(walk.dbg) << "store variable [" << string_index << "]" <<
 					str_table(string_index) << "->"
 					<< var_pos.value().up_count << ","
@@ -1699,6 +1740,10 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				auto string_index = walk.module_ctx.find_or_put_string(left_ref->block.as_string());
 				auto var_pos = walk.get_var_ref(ctx, string_index);
 				if(!var_pos.has_value()) {
+					if(walk.pass1()) {
+						_DW(walk.err) << "pass1 variable not found: " << str_table(string_index) << "\n";
+						return walk_expression(walk, ctx, right_ref);
+					}
 					_DW(walk.err) << "variable not found: " << str_table(string_index) << "\n";
 					return false;
 				}
@@ -1706,55 +1751,53 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 					_DW(walk.err) << "write to immutable variable: " << str_table(string_index) << '\n';
 					return false;
 				}
-				ctx->instructions.emplace_back(
-					Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				ins(Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
 				_DW(walk.dbg) << "load variable [" << string_index  << "]" <<
 					str_table(string_index) << "->"
 					<< var_pos.value().up_count << ","
 					<< var_pos.value().decl_index << "\n";
-				ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+				ins(Instruction{Opcode::PushRegister, 0});
 				if(!walk_expression(walk, ctx, right_ref)) return false;
 				switch(expr->ast_token) {
 				case Token::O_AndEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::AndInteger, 0});
+					ins(Instruction{Opcode::AndInteger, 0});
 					break;
 				case Token::O_OrEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::OrInteger, 0});
+					ins(Instruction{Opcode::OrInteger, 0});
 					break;
 				case Token::O_XorEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::XorInteger, 0});
+					ins(Instruction{Opcode::XorInteger, 0});
 					break;
 				case Token::O_AddEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::AddInteger, 0});
+					ins(Instruction{Opcode::AddInteger, 0});
 					break;
 				case Token::O_SubEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::SubInteger, 0});
+					ins(Instruction{Opcode::SubInteger, 0});
 					break;
 				case Token::O_MulEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::MulInteger, 0});
+					ins(Instruction{Opcode::MulInteger, 0});
 					break;
-					//ctx->instructions.emplace_back(Instruction{Opcode::PowInteger, 0});
+					//ins(Instruction{Opcode::PowInteger, 0});
 				case Token::O_DivEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::DivInteger, 0});
+					ins(Instruction{Opcode::DivInteger, 0});
 					break;
 				case Token::O_ModEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::ModInteger, 0});
+					ins(Instruction{Opcode::ModInteger, 0});
 					break;
 				case Token::O_LshEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::LSHInteger, 0});
+					ins(Instruction{Opcode::LSHInteger, 0});
 					break;
 				case Token::O_RAshEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::RSHAInteger, 0});
+					ins(Instruction{Opcode::RSHAInteger, 0});
 					break;
 				case Token::O_RshEq:
-					ctx->instructions.emplace_back(Instruction{Opcode::RSHLInteger, 0});
+					ins(Instruction{Opcode::RSHLInteger, 0});
 					break;
 				default:
 					_DW(walk.err) << "unhandled assign operator: " << expr->ast_token << '\n';
 					return false;
 				}
-				ctx->instructions.emplace_back(
-					Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
+				ins(Instruction{Opcode::StoreVariable, var_pos.value().up_count, var_pos.value().decl_index});
 				_DW(walk.dbg) << "store variable [" << string_index << "]" <<
 					str_table(string_index) << "->"
 					<< var_pos.value().up_count << ","
@@ -1774,11 +1817,11 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				}
 				size_t string_index = walk.module_ctx.find_or_put_string(
 					expr->slot2->block.as_string() );
-				ctx->instructions.emplace_back(Instruction{Opcode::NamedLookup, string_index});
+				ins(Instruction{Opcode::NamedLookup, string_index});
 				return true;
 			}
 			_DW(walk.dbg) << "\nexpr R: ";
-			ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+			ins(Instruction{Opcode::PushRegister, 0});
 			if(!walk_expression(walk, ctx, expr->slot2)) return false;
 			if(!generate_oper_expr(expr)) return false;
 			return true;
@@ -1797,7 +1840,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		}
 		while(expr_itr != expr_end) {
 			_DW(walk.dbg) << "\nexpr I: ";
-			ctx->instructions.emplace_back(Instruction{Opcode::PushRegister, 0});
+			ins(Instruction{Opcode::PushRegister, 0});
 			if(!walk_expression(walk, ctx, *expr_itr)) return false;
 			if(!generate_oper_expr(expr)) return false;
 			expr_itr++;
@@ -1807,7 +1850,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 	case Expr::Start:
 		switch(expr->ast_token) {
 		case Token::Zero: 
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, 0});
+			ins(Instruction{Opcode::LoadConst, 0});
 			return true;
 		case Token::Number: {
 			uint64_t value = 0;
@@ -1816,7 +1859,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				return false;
 			}
 			_DW(walk.dbg) << "number value: " << value << "\n";
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
+			ins(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::NumberHex: {
@@ -1826,7 +1869,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				return false;
 			}
 			_DW(walk.dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
+			ins(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::NumberOct: {
@@ -1836,7 +1879,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				return false;
 			}
 			_DW(walk.dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
+			ins(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::NumberBin: {
@@ -1846,24 +1889,26 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				return false;
 			}
 			_DW(walk.dbg) << "number value: " << value << " from " << expr->block.as_string() << "\n";
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadConst, value});
+			ins(Instruction{Opcode::LoadConst, value});
 			return true;
 		}
 		case Token::K_True:
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadBool, 1});
+			ins(Instruction{Opcode::LoadBool, 1});
 			return true;
 		case Token::K_False:
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadBool, 0});
+			ins(Instruction{Opcode::LoadBool, 0});
 			return true;
 		case Token::Ident: {
 			auto string_index = walk.module_ctx.find_or_put_string(expr->block.as_string());
 			auto var_pos = walk.get_var_ref(ctx, string_index);
+			if(walk.pass1() && !var_pos.has_value()) {
+				_DW(walk.dbg) << "pass1 unfound variable\n";
+				return true;
+			}
 			if(!var_pos.has_value()) {
-				_DW(walk.err) << "variable not found: " << walk.module_ctx.string_table[string_index] << "\n";
 				return false;
 			}
-			ctx->instructions.emplace_back(
-				Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
+			ins(Instruction{Opcode::LoadVariable, var_pos.value().up_count, var_pos.value().decl_index});
 			_DW(walk.dbg) << "load variable [" << string_index  << "]" <<
 				expr->block.as_string() << "->"
 				<< var_pos.value().up_count << ","
@@ -1879,7 +1924,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 				}
 			}
 			size_t string_index = walk.module_ctx.find_or_put_string(s);
-			ctx->instructions.emplace_back(Instruction{Opcode::LoadString, string_index});
+			ins(Instruction{Opcode::LoadString, string_index});
 			return true;
 		}
 		default:
@@ -1887,7 +1932,7 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 		}
 		return false;
 	case Expr::End: {
-		ctx->instructions.emplace_back(Instruction{Opcode::LoadUnit, 0});
+		ins(Instruction{Opcode::LoadUnit, 0});
 		return true;
 	}
 	case Expr::FuncExpr: {
@@ -1895,10 +1940,16 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			walk.show_syn_error("Function expression", expr);
 			return false;
 		}
-		_DW(walk.dbg) << "TODO function start " << expr->block.as_string() << '\n';
-		auto function_context = std::make_shared<FrameContext>(walk.module_ctx.frames.size(), ctx);
-		walk.module_ctx.frames.push_back(function_context);
-		ctx->instructions.emplace_back(Instruction{Opcode::LoadClosure, function_context->frame_index});
+		_DW(walk.dbg) << "TODO function start[" << walk.current_frame_index << "] " << expr->block.as_string() << '\n';
+		framectx_ptr function_context;
+		if(walk.pass2) {
+			function_context = walk.module_ctx.frames[walk.current_frame_index];
+		} else {
+			function_context = std::make_shared<FrameContext>(walk.current_frame_index, ctx);
+			walk.module_ctx.frames.push_back(function_context);
+		}
+		walk.current_frame_index++;
+		ins(Instruction{Opcode::LoadClosure, function_context->frame_index});
 		// expr_args // TODO named argument list for the function declaration
 		auto &expr_args = expr->slot1;
 		if(IS_TOKEN(expr_args, Block)) {
@@ -1906,16 +1957,18 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 			return false;
 		} else if((IS_CLASS(expr_args, OperExpr) && IS_TOKEN(expr_args, Comma))) {
 			auto &comma_list = expr_args->list;
-			for(auto &arg : comma_list) {
-				if(!IS_TOKEN(arg, Ident)) {
-					_DW(walk.err) << "unknown list function argument type: " << arg << '\n';
-					return false;
+			if(walk.pass1()) {
+				for(auto &arg : comma_list) {
+					if(!IS_TOKEN(arg, Ident)) {
+						_DW(walk.err) << "unknown list function argument type: " << arg << '\n';
+						return false;
+					}
+					auto string_index =
+						walk.module_ctx.find_or_put_string(arg->block.as_string());
+					function_context->arg_declarations.emplace_back(
+						VariableDeclaration{string_index,
+						function_context->arg_declarations.size()});
 				}
-				auto string_index =
-					walk.module_ctx.find_or_put_string(arg->block.as_string());
-				function_context->arg_declarations.emplace_back(
-					VariableDeclaration{string_index,
-					function_context->arg_declarations.size()});
 			}
 		} else {
 			_DW(walk.err) << "unknown function argument type: " << expr_args << '\n';
@@ -3075,6 +3128,9 @@ module_ptr compile_sourcefile(string file_source) {
 	parse_source(std::cerr, root_module);
 	auto walk = WalkContext{std::cerr, std::cerr, *root_module.get()};
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
+	walk.pass_reset();
+	walk.pass2 = true;
+	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	show_string_table(std::cerr, *root_module);
 	show_scopes(std::cerr, *root_module);
 	return root_module;
@@ -3087,6 +3143,9 @@ module_ptr test_compile_sourcefile(std::ostream &dbg, const string_view file_pat
 	parse_source(dbg, root_module);
 	show_source_tree(dbg, root_module->source);
 	auto walk = WalkContext{dbg, dbg, *root_module.get()};
+	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
+	walk.pass_reset();
+	walk.pass2 = true;
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	show_string_table(dbg, *root_module);
 	show_scopes(dbg, *root_module);
@@ -3108,18 +3167,19 @@ void ScriptContext::LoadScriptFile(const string_view file_path, const string_vie
 }
 
 struct StackFrame;
+struct UpScope {
+	std::shared_ptr<UpScope> up;
+	std::vector<Variable> vars;
+};
 struct StackFrame {
 	std::shared_ptr<FrameContext> context;
-	std::shared_ptr<StackFrame> up;
+	std::shared_ptr<UpScope> scope;
 	std::vector<Instruction>::const_iterator current_instruction;
-	std::vector<Variable> closed_vars;
-	std::vector<Variable> arg_vars;
-	std::vector<Variable> local_vars;
 	std::vector<Variable> value_stack;
 	StackFrame(
 		std::shared_ptr<FrameContext> ctx,
-		std::shared_ptr<StackFrame> up_ptr)
-		: context{ctx}, up{up_ptr} {}
+		std::shared_ptr<UpScope> up_ptr)
+		: scope{std::make_shared<UpScope>(UpScope{up_ptr})}, context{ctx} { }
 };
 
 void ScriptContext::FunctionCall(const string_view func_name) {
@@ -3136,15 +3196,17 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 	auto current_instruction = current_context->instructions.cbegin();
 	auto end_of_instructions = current_context->instructions.cend();
 	std::vector<std::shared_ptr<StackFrame>> scope_stack;
-	std::vector<std::shared_ptr<StackFrame>> closure_frames;
-	auto current_frame = std::make_shared<StackFrame>(current_context, std::shared_ptr<StackFrame>());
+	std::vector<std::shared_ptr<UpScope>> closure_frames;
+	auto current_frame = std::make_shared<StackFrame>(current_context, std::shared_ptr<UpScope>());
 	Variable accumulator;
 	auto show_accum = [&]() {
 		dbg << "A: " << accumulator << '\n';
 	};
 	auto show_args = [&]() {
 		dbg << "Args:";
-		for(auto &v : current_frame->arg_vars) dbg << " " << v;
+		//for(auto &v : current_frame->arg_vars) dbg << " " << v;
+		if(current_frame->value_stack.empty()) dbg << "<E!>";
+		else for(auto &v : current_frame->value_stack) { dbg << " " << v; }
 		dbg << '\n';
 	};
 	auto show_vars = [&]() {
@@ -3153,8 +3215,8 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 		else for(auto &v : current_frame->value_stack) { dbg << " " << v; }
 		dbg << " A: " << accumulator;
 		dbg << " Locals:";
-		if(current_frame->local_vars.empty()) dbg << "<E!>";
-		else for(auto &v : current_frame->local_vars) { dbg << " " << v; }
+		if(current_frame->scope->vars.empty()) dbg << "<E!>";
+		else for(auto &v : current_frame->scope->vars) { dbg << " " << v; }
 		dbg << '\n';
 	};
 	auto pop_value = [&]() {
@@ -3213,8 +3275,8 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 				}
 				auto end_arg = prev_stack.end();
 				auto begin_arg = end_arg - param;
-				current_frame->arg_vars.reserve(end_arg - begin_arg);
-				std::move(begin_arg, end_arg, std::back_inserter(current_frame->arg_vars));
+				current_frame->value_stack.reserve(end_arg - begin_arg);
+				std::move(begin_arg, end_arg, std::back_inserter(current_frame->value_stack));
 				prev_stack.erase(begin_arg, end_arg);
 			}
 			current_instruction = next_context->instructions.cbegin();
@@ -3228,18 +3290,18 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 			dbg << "load closure: " << param << " capture scope variables\n";
 			// param is scope_id
 			size_t current_closure = closure_frames.size();
-			closure_frames.push_back(current_frame);
+			closure_frames.push_back(current_frame->scope);
 			accumulator = Variable{param | (current_closure << 32), VarType::Function};
 			show_accum();
 			break;
 		}
 		case Opcode::NamedArgLookup: {
 			if(accumulator.vtype != VarType::Integer
-				|| accumulator.value >= current_frame->arg_vars.size()) {
+				|| accumulator.value >= current_frame->value_stack.size()) {
 				dbg << "arg ref: bad time or number";
 				return;
 			}
-			accumulator = current_frame->arg_vars[accumulator.value];
+			accumulator = current_frame->value_stack[accumulator.value];
 			show_accum();
 			break;
 		}
@@ -3411,7 +3473,7 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 		case Opcode::StoreVariable: {
 			uint32_t up_count = ins->param_a;
 			dbg << "store variable: " << up_count << "," << ins->param_b << ": ";
-			auto search_context = current_frame.get();
+			auto search_context = current_frame->scope.get();
 			for(;up_count != 0; up_count--) {
 				search_context = search_context->up.get();
 				if(search_context == nullptr) {
@@ -3419,21 +3481,19 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 					return;
 				}
 			}
-			auto &var_list = search_context->context->var_declarations;
-			if(ins->param_b >= var_list.size()) {
+			if(ins->param_b >= search_context->vars.size()) {
 				dbg << "reference out of bounds\n";
 				return;
 			}
-			auto &var_decl = var_list.at(ins->param_b);
 			// found variable case
-			search_context->local_vars[var_decl.pos] = accumulator;
+			search_context->vars[ins->param_b] = accumulator;
 			show_vars();
 			break;
 		}
 		case Opcode::LoadVariable: {
 			uint32_t up_count = ins->param_a;
 			dbg << "load variable: " << up_count << "," << ins->param_b << ": ";
-			auto search_context = current_frame.get();
+			auto search_context = current_frame->scope.get();
 			for(;up_count != 0; up_count--) {
 				search_context = search_context->up.get();
 				if(search_context == nullptr) {
@@ -3441,55 +3501,40 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 					return;
 				}
 			}
-			auto &var_list = search_context->context->var_declarations;
-			if(ins->param_b >= var_list.size()) {
+			if(ins->param_b >= search_context->vars.size()) {
 				dbg << "reference out of bounds\n";
 				return;
 			}
-			auto &var_decl = var_list.at(ins->param_b);
 			// found variable case
-			accumulator = search_context->local_vars[var_decl.pos];
+			accumulator = search_context->vars[ins->param_b];
 			show_accum();
 			break;
 		}
-		case Opcode::LoadArg: {
-			uint32_t up_count = ins->param_a;
-			dbg << "load argument: " << up_count << "," << ins->param_b << ": ";
-			auto search_context = current_frame.get();
-			for(;up_count != 0; up_count--) {
-				search_context = search_context->up.get();
-				if(search_context == nullptr) {
-					dbg << "frame depth error\n";
-					return;
-				}
-			}
-			auto &arg_list = search_context->context->arg_declarations;
-			if(ins->param_b >= arg_list.size()) {
+		case Opcode::LoadLocal: {
+			uint32_t pos = ins->param_a;
+			dbg << "load argument: " << pos << "," << ins->param_b << ": ";
+			if(pos >= current_frame->value_stack.size()) {
 				dbg << "reference out of bounds\n";
 				return;
 			}
-			auto &arg_decl = arg_list.at(ins->param_b);
-			// found variable
-			accumulator = search_context->arg_vars[arg_decl.pos];
+			accumulator = current_frame->value_stack[pos];
 			show_args();
 			show_accum();
 			break;
 		}
 		case Opcode::AssignLocal: {
-			auto &var_decl = current_context->var_declarations[param];
-			dbg << "assign local variable: [" << var_decl.pos << "]"
-				<< current_module->string_table.at(var_decl.name_index)
-				<< '\n';
-			if(var_decl.pos == current_frame->local_vars.size()) {
-				current_frame->local_vars.push_back(accumulator);
+			uint32_t pos = ins->param_a;
+			dbg << "assign local variable: [" << pos << "]" << '\n';
+			if(pos == current_frame->value_stack.size()) {
+				current_frame->value_stack.push_back(accumulator);
 			} else {
-				current_frame->local_vars.at(var_decl.pos) = accumulator;
+				current_frame->value_stack.at(pos) = accumulator;
 			}
 			show_vars();
 			break;
 		}
 		case Opcode::ExitScope: {
-			current_frame->local_vars.resize(param);
+			current_frame->value_stack.resize(param);
 			show_vars();
 			break;
 		}
