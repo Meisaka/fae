@@ -1001,6 +1001,9 @@ std::string_view const variable_type_names[] = {
 #undef GENERATE
 };
 auto const variable_type_names_span = std::span(variable_type_names);
+struct VMVar {
+	virtual VarType get_type() const { return VarType::Unset; }
+};
 struct Variable {
 	uint64_t value;
 	VarType vtype;
@@ -1016,7 +1019,7 @@ std::ostream &operator<<(std::ostream &os, const Variable &v) {
 		<< variable_type_names[vtype]
 		<< ":";
 	if(v.vtype == VarType::Function) {
-		os << (v.value & 0xffffffff) << "," << (v.value >> 32ull);
+		os << v.value;
 	} else if(v.vtype == VarType::Bool) {
 		os << (v.value == 0 ? 'F' : 'T');
 	} else {
@@ -1234,7 +1237,7 @@ struct WalkContext {
 	bool pass2;
 	WalkContext(std::ostream &debug_stream, std::ostream &error_stream, ModuleContext &module)
 		: dbg{debug_stream}, err{error_stream}, module_ctx{module},
-			pass2{false}, current_frame_index{0}
+			pass2{false}, current_frame_index{1}
 	{}
 	void pass_reset() {
 		current_frame_index = 1;
@@ -3157,16 +3160,16 @@ module_ptr test_parse_sourcefile(std::ostream &dbg, const string_view file_path)
 ModuleSource& get_source(const module_ptr &module) {
 	return module->source;
 }
-module_ptr compile_sourcefile(string file_source) {
+module_ptr compile_sourcefile(std::ostream &out, string file_source) {
 	module_ptr root_module = std::make_shared<ModuleContext>(std::move(file_source));
-	parse_source(std::cerr, root_module);
-	auto walk = WalkContext{std::cerr, std::cerr, *root_module.get()};
+	parse_source(out, root_module);
+	auto walk = WalkContext{out, out, *root_module.get()};
+	root_module->add_import("sys");
+	root_module->add_import("io");
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
 	walk.pass_reset();
 	walk.pass2 = true;
 	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
-	show_string_table(std::cerr, *root_module);
-	show_scopes(std::cerr, *root_module);
 	return root_module;
 }
 module_ptr test_compile_sourcefile(std::ostream &dbg, const string_view file_path) {
@@ -3196,10 +3199,9 @@ void ScriptContext::LoadScriptFile(const string_view file_path, const string_vie
 	auto &dbg = dbg_file;
 	std::string file_source;
 	if(!LoadFileV(file_path, file_source)) return;
-	module_ptr root_module = std::make_shared<ModuleContext>(std::move(file_source));
-	parse_source(dbg, root_module);
-	auto walk = WalkContext{dbg, dbg, *root_module.get()};
-	walk_expression(walk, root_module->root_context, root_module->source.root_tree);
+	module_ptr root_module = compile_sourcefile(dbg, std::move(file_source));
+	show_string_table(dbg, *root_module);
+	show_scopes(dbg, *root_module);
 	this->script_map[string(into_name)] = root_module;
 }
 
@@ -3208,16 +3210,59 @@ struct UpScope {
 	std::shared_ptr<UpScope> up;
 	std::vector<Variable> vars;
 };
+struct VMFunction : VMVar {
+	std::shared_ptr<UpScope> up;
+	size_t scope_id;
+	VMFunction(std::shared_ptr<UpScope> _up, size_t _id)
+		: up{_up}, scope_id{_id} {}
+	VarType get_type() const { return VarType::Function; }
+};
 struct StackFrame {
 	std::shared_ptr<FrameContext> context;
 	std::shared_ptr<UpScope> scope;
 	std::vector<Instruction>::const_iterator current_instruction;
-	std::vector<Variable> value_stack;
+	size_t first_arg_pos;
+	size_t first_var_pos;
 	StackFrame(
 		std::shared_ptr<FrameContext> ctx,
 		std::shared_ptr<UpScope> up_ptr)
-		: scope{std::make_shared<UpScope>(UpScope{up_ptr})}, context{ctx} { }
+		: scope{std::make_shared<UpScope>(UpScope{up_ptr})}, context{ctx},
+		first_arg_pos{0}, first_var_pos{0} { }
 };
+
+struct DisplayVar {
+	const Variable &v;
+	const std::vector<std::shared_ptr<VMVar>> &table;
+};
+std::ostream &operator<<(std::ostream &os, const DisplayVar &v) {
+	size_t vtype = static_cast<size_t>(v.v.vtype);
+	if(vtype >= variable_type_names_span.size()) vtype = 0;
+	os << "{";
+	switch(v.v.vtype) {
+	case VarType::Bool:
+		os << (v.v.value == 0 ? "False" : "True");
+		break;
+	case VarType::Integer:
+		os << static_cast<int64_t>(v.v.value);
+		break;
+	case VarType::Function: {
+		auto ptr = v.table[v.v.value].get();
+		if(ptr->get_type() == VarType::Function) {
+			auto f_ptr = static_cast<VMFunction*>(ptr);
+			os << "Fn:" << f_ptr->scope_id;
+		} else {
+			os << "Fn!=" << variable_type_names[static_cast<size_t>(ptr->get_type())];
+		}
+		break;
+	}
+	case VarType::Unset:
+	case VarType::Unit:
+		os << variable_type_names[vtype];
+		break;
+	}
+	os << "}";
+	return os;
+}
 
 void ScriptContext::FunctionCall(const string_view func_name) {
 	auto found = std::ranges::find_if(script_map.cbegin(), script_map.cend(), [&](auto &v) { return func_name == v.first; } );
@@ -3233,38 +3278,71 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 	auto current_instruction = current_context->instructions.cbegin();
 	auto end_of_instructions = current_context->instructions.cend();
 	std::vector<std::shared_ptr<StackFrame>> scope_stack;
-	std::vector<std::shared_ptr<UpScope>> closure_frames;
+	std::vector<std::shared_ptr<VMVar>> var_table;
+	std::vector<Variable> value_stack;
 	auto current_frame = std::make_shared<StackFrame>(current_context, std::shared_ptr<UpScope>());
+	current_frame->scope->vars.resize(current_context->closed_declarations.size());
+	value_stack.resize(current_frame->first_arg_pos + current_context->arg_declarations.size());
+	current_frame->first_var_pos = value_stack.size();
+	value_stack.resize(current_frame->first_var_pos + current_context->var_declarations.size());
 	Variable accumulator;
 	auto show_accum = [&]() {
-		dbg << "A: " << accumulator << '\n';
+		dbg << "A: " << DisplayVar{accumulator, var_table} << '\n';
 	};
 	auto show_args = [&]() {
 		dbg << "Args:";
-		//for(auto &v : current_frame->arg_vars) dbg << " " << v;
-		if(current_frame->value_stack.empty()) dbg << "<E!>";
-		else for(auto &v : current_frame->value_stack) { dbg << " " << v; }
+		if(value_stack.empty() || current_frame->first_var_pos == current_frame->first_arg_pos) {
+			dbg << "<E!>";
+		} else {
+			auto begin = value_stack.cbegin();
+			auto end = begin + current_frame->first_var_pos;
+			for(auto v = begin + current_frame->first_arg_pos; v != end; v++) {
+				dbg << " " << DisplayVar{*v, var_table};
+			}
+		}
 		dbg << '\n';
 	};
 	auto show_vars = [&]() {
-		dbg << "Stack:";
-		if(current_frame->value_stack.empty()) dbg << "<E!>";
-		else for(auto &v : current_frame->value_stack) { dbg << " " << v; }
-		dbg << " A: " << accumulator;
-		dbg << " Locals:";
-		if(current_frame->scope->vars.empty()) dbg << "<E!>";
-		else for(auto &v : current_frame->scope->vars) { dbg << " " << v; }
+		dbg << " A: " << DisplayVar{accumulator, var_table};
+		auto local_size = current_frame->context->var_declarations.size();
+		auto close_size = current_frame->context->closed_declarations.size();
+		dbg << "\n Vars:";
+		if(value_stack.empty() || close_size == 0) {
+			dbg << "<E!>";
+		} else {
+			for(auto &v : current_frame->scope->vars) {
+				dbg << " " << DisplayVar{v, var_table};
+			}
+		}
+		dbg << "\n Locals:";
+		auto stack_itr = value_stack.cbegin() + current_frame->first_var_pos;
+		if(current_frame->first_var_pos >= value_stack.size()) {
+			stack_itr = value_stack.cend();
+		}
+		if(value_stack.empty() || local_size == 0) {
+			dbg << "<E!>";
+		} else {
+			auto locals_end = current_frame->first_var_pos + local_size >= value_stack.size() ?
+				value_stack.cend() : stack_itr + local_size;
+			for(; stack_itr != locals_end; stack_itr++) {
+				dbg << " " << DisplayVar{*stack_itr, var_table};
+			}
+		}
+		dbg << "\n Stack:";
+		if(stack_itr == value_stack.cend()) dbg << "<E!>";
+		else for(;stack_itr != value_stack.cend(); stack_itr++) { dbg << " " << DisplayVar{*stack_itr, var_table}; }
 		dbg << '\n';
 	};
 	auto pop_value = [&]() {
-		auto value = current_frame->value_stack.back();
-		current_frame->value_stack.pop_back();
+		auto value = value_stack.back();
+		value_stack.pop_back();
 		return std::move(value);
 	};
 	for(;;) {
 		if(current_instruction == end_of_instructions) {
 			if(!scope_stack.empty()) {
 				show_vars();
+				value_stack.resize(current_frame->first_arg_pos);
 				auto next_scope = std::move(scope_stack.back());
 				scope_stack.pop_back();
 				current_instruction = next_scope->current_instruction;
@@ -3290,32 +3368,52 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 			continue;
 		}
 		case Opcode::CallExpression: {
-			size_t closure_frame = accumulator.value >> 32;
-			size_t frame_index = accumulator.value & 0xffffffffull;
-			if(accumulator.vtype != VarType::Function || frame_index >= current_module->frames.size()) {
+			size_t var_index = accumulator.value >> 32;
+			if(accumulator.vtype != VarType::Function || var_index >= var_table.size()) {
 				dbg << "call to non-function value\n";
 				show_vars();
 				return;
 			}
+			auto func_var = var_table[var_index];
+			if(func_var->get_type() != VarType::Function) {
+				dbg << "broken function reference\n";
+				show_vars();
+				return;
+			}
+			auto func_ptr = static_cast<VMFunction*>(func_var.get());
+			size_t frame_index = func_ptr->scope_id;
+			if(frame_index >= current_module->frames.size()) {
+				dbg << "call to non-existant function value\n";
+				show_vars();
+				return;
+			}
+			auto closure_frame_ptr = func_ptr->up;
 			auto next_context = current_module->frames[frame_index];
-			auto &prev_stack = current_frame->value_stack;
-			auto closure_frame_ptr = closure_frames[closure_frame];
 			current_frame->current_instruction = current_instruction;
+			auto prev_frame = current_frame.get();
 			scope_stack.push_back(current_frame);
 			current_frame = std::make_shared<StackFrame>(next_context, closure_frame_ptr);
-			if(param > 0) {
-				// take the argument's values from the stack
-				// and actually give them to the function
-				if(param > prev_stack.size()) {
-					dbg << "stack underflow!\n";
-					return;
-				}
-				auto end_arg = prev_stack.end();
-				auto begin_arg = end_arg - param;
-				current_frame->value_stack.reserve(end_arg - begin_arg);
-				std::move(begin_arg, end_arg, std::back_inserter(current_frame->value_stack));
-				prev_stack.erase(begin_arg, end_arg);
+			current_frame->scope->vars.resize(next_context->closed_declarations.size());
+			// take the argument's values from the stack
+			// and actually give them to the function
+			size_t end_prev_frame_vars =
+				prev_frame->first_var_pos + prev_frame->context->var_declarations.size();
+			size_t stack_size = value_stack.size();
+			if(param > stack_size) {
+				dbg << "stack underflow!\n";
+				return;
 			}
+			if(end_prev_frame_vars > stack_size) {
+				dbg << "the value stack is broken!\n";
+				return;
+			}
+			if(param > stack_size - end_prev_frame_vars) {
+				dbg << "stack underflow!\n";
+				return;
+			}
+			current_frame->first_arg_pos = stack_size - param;
+			current_frame->first_var_pos = stack_size;
+			value_stack.resize(stack_size + next_context->var_declarations.size());
 			current_instruction = next_context->instructions.cbegin();
 			end_of_instructions = next_context->instructions.cend();
 			current_context = next_context;
@@ -3326,27 +3424,106 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 		case Opcode::LoadClosure: {
 			dbg << "load closure: " << param << " capture scope variables\n";
 			// param is scope_id
-			size_t current_closure = closure_frames.size();
-			closure_frames.push_back(current_frame->scope);
-			accumulator = Variable{param | (current_closure << 32), VarType::Function};
+			size_t current_var = var_table.size();
+			var_table.emplace_back(std::make_shared<VMFunction>(current_frame->scope, param));
+			accumulator = Variable{current_var, VarType::Function};
 			show_accum();
+			break;
+		}
+		case Opcode::NamedLookup: {
+			dbg << "named lookup: \"" << current_module->string_table[ins->param_a] << "\" not implemented\n";
+			return;
 			break;
 		}
 		case Opcode::NamedArgLookup: {
 			if(accumulator.vtype != VarType::Integer
-				|| accumulator.value >= current_frame->value_stack.size()) {
+				|| accumulator.value >= current_frame->first_var_pos - current_frame->first_arg_pos) {
 				dbg << "arg ref: bad time or number";
 				return;
 			}
-			accumulator = current_frame->value_stack[accumulator.value];
+			accumulator = value_stack[current_frame->first_arg_pos + accumulator.value];
 			show_accum();
 			break;
 		}
 		case Opcode::LoadConst:
 			accumulator = Variable{param, VarType::Integer};
 			break;
+		case Opcode::LoadVariable: {
+			uint32_t up_count = ins->param_a;
+			dbg << "load variable: " << up_count << "," << ins->param_b << ": ";
+			auto search_context = current_frame->scope.get();
+			for(;up_count != 0; up_count--) {
+				search_context = search_context->up.get();
+				if(search_context == nullptr) {
+					dbg << "frame depth error\n";
+					return;
+				}
+			}
+			if(ins->param_b >= search_context->vars.size()) {
+				dbg << "reference out of bounds\n";
+				return;
+			}
+			// found variable case
+			accumulator = search_context->vars[ins->param_b];
+			show_accum();
+			break;
+		}
+		case Opcode::StoreVariable: {
+			uint32_t up_count = ins->param_a;
+			dbg << "store variable: " << up_count << "," << ins->param_b << ": ";
+			auto search_context = current_frame->scope.get();
+			for(;up_count != 0; up_count--) {
+				search_context = search_context->up.get();
+				if(search_context == nullptr) {
+					dbg << "frame depth error\n";
+					return;
+				}
+			}
+			if(ins->param_b >= search_context->vars.size()) {
+				dbg << "reference out of bounds\n";
+				return;
+			}
+			// found variable case
+			search_context->vars[ins->param_b] = accumulator;
+			show_vars();
+			break;
+		}
+		case Opcode::LoadLocal: {
+			size_t pos = current_frame->first_var_pos + ins->param_b;
+			dbg << "load local: " << pos << "," << ins->param_b << ": ";
+			if(pos >= value_stack.size()) {
+				dbg << "reference out of bounds\n";
+				return;
+			}
+			accumulator = value_stack[pos];
+			show_args();
+			show_accum();
+			break;
+		}
+		case Opcode::StoreLocal: {
+			uint32_t pos = current_frame->first_var_pos + ins->param_b;
+			dbg << "assign local variable: [" << pos << "]" << '\n';
+			if(pos >= value_stack.size()) {
+				value_stack.resize(pos + 1);
+			}
+			value_stack.at(pos) = accumulator;
+			show_vars();
+			break;
+		}
+		case Opcode::LoadArg: {
+			uint32_t pos = current_frame->first_arg_pos + ins->param_b;
+			dbg << "load arg: " << current_frame->first_arg_pos << "+" << ins->param_b << ": ";
+			if(pos >= value_stack.size()) {
+				accumulator = Variable{};
+			} else {
+				accumulator = value_stack[pos];
+			}
+			show_args();
+			show_accum();
+			break;
+		}
 		case Opcode::PushRegister:
-			current_frame->value_stack.push_back(accumulator);
+			value_stack.push_back(accumulator);
 			show_vars();
 			break;
 		case Opcode::PopRegister:
@@ -3358,15 +3535,15 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 			show_vars();
 			break;
 		case Opcode::LoadStack:
-			if(param >= current_frame->value_stack.size()) {
+			if(param >= value_stack.size()) {
 				accumulator = Variable{};
 			} else {
-				accumulator = *(current_frame->value_stack.crbegin() + param);
+				accumulator = *(value_stack.crbegin() + param);
 			}
 			break;
 		case Opcode::StoreStack:
-			if(param < current_frame->value_stack.size()) {
-				*(current_frame->value_stack.rend() + param) = accumulator;
+			if(param < value_stack.size()) {
+				*(value_stack.rbegin() + param) = accumulator;
 			}
 			break;
 		case Opcode::AddInteger:
@@ -3507,76 +3684,14 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 		case Opcode::LoadUnit:
 			accumulator = Variable{0, VarType::Unit};
 			break;
-		case Opcode::StoreVariable: {
-			uint32_t up_count = ins->param_a;
-			dbg << "store variable: " << up_count << "," << ins->param_b << ": ";
-			auto search_context = current_frame->scope.get();
-			for(;up_count != 0; up_count--) {
-				search_context = search_context->up.get();
-				if(search_context == nullptr) {
-					dbg << "frame depth error\n";
-					return;
-				}
-			}
-			if(ins->param_b >= search_context->vars.size()) {
-				dbg << "reference out of bounds\n";
-				return;
-			}
-			// found variable case
-			search_context->vars[ins->param_b] = accumulator;
-			show_vars();
-			break;
-		}
-		case Opcode::LoadVariable: {
-			uint32_t up_count = ins->param_a;
-			dbg << "load variable: " << up_count << "," << ins->param_b << ": ";
-			auto search_context = current_frame->scope.get();
-			for(;up_count != 0; up_count--) {
-				search_context = search_context->up.get();
-				if(search_context == nullptr) {
-					dbg << "frame depth error\n";
-					return;
-				}
-			}
-			if(ins->param_b >= search_context->vars.size()) {
-				dbg << "reference out of bounds\n";
-				return;
-			}
-			// found variable case
-			accumulator = search_context->vars[ins->param_b];
-			show_accum();
-			break;
-		}
-		case Opcode::LoadLocal: {
-			uint32_t pos = ins->param_a;
-			dbg << "load argument: " << pos << "," << ins->param_b << ": ";
-			if(pos >= current_frame->value_stack.size()) {
-				dbg << "reference out of bounds\n";
-				return;
-			}
-			accumulator = current_frame->value_stack[pos];
-			show_args();
-			show_accum();
-			break;
-		}
-		case Opcode::StoreLocal: {
-			uint32_t pos = ins->param_a;
-			dbg << "assign local variable: [" << pos << "]" << '\n';
-			if(pos == current_frame->value_stack.size()) {
-				current_frame->value_stack.push_back(accumulator);
-			} else {
-				current_frame->value_stack.at(pos) = accumulator;
-			}
-			show_vars();
-			break;
-		}
 		case Opcode::ExitScope: {
-			current_frame->value_stack.resize(param);
+			dbg << "TODO ExitScope\n";
 			show_vars();
 			break;
 		}
 		default:
 			dbg << "not implemented: " << current_instruction->opcode << '\n';
+			return;
 		}
 		current_instruction++;
 		if(++number_of_instructions_run > 1000) {

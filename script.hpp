@@ -93,7 +93,7 @@ void show_source_tree(std::ostream &out, const ModuleSource &source);
 void show_scopes(std::ostream &out, const ModuleContext &module);
 void show_lines(std::ostream &out, const ModuleContext &module);
 void show_string_table(std::ostream &out, const ModuleContext &module);
-module_ptr compile_sourcefile(string file_source);
+module_ptr compile_sourcefile(std::ostream &out, string file_source);
 module_ptr test_parse_sourcefile(std::ostream &dbg, const string_view file_path);
 module_ptr test_compile_sourcefile(std::ostream &dbg, const string_view file_path);
 

@@ -4,20 +4,21 @@ Almost second name: Tsun
 
 TODO items:
 partial/bug:
-	make closure bind scoped variables that will fall out of scope
-	... or else!
+	up arguments in closures are borked again.
 
 object-like types:
 	function variables as objects or something
-	object variables need... to exist
-	+array variables need... to exist
-	|string variables need... to exist
+	constants table
+		revisit object blocks
+		object variables need... to exist
+		object block code gen
+	array blocks
+		array variables need... to exist
+	string variables need... to exist
 		length operator
 		string operators: concat
 		add "for"
 		add "in"
-	constants table
-		object block code gen
 	gc
 remaining normal operators
 namespaces
@@ -26,7 +27,6 @@ namespaces
 
 type checking on operators (during compile maybe?)
 variant type
-array blocks
 ranges:
 	add parser tests for this
 	expr ".." expr
@@ -39,9 +39,12 @@ pattern matching: spec and grammar
 
 optimizations:
 	const variable (don't need to stack them, probably)
+	eliminate Jump to Jump in IR
 	mutable variable (keep on stack, or skip reload if in register)
 	constant folding (and other similar operations)
+	variable lifetimes and destruction
 	tail calls (a call at the end of a function, or: "end" function_call )
+	up values in tail calls: skip allocating empty "up scopes"
 	static control flow path detection and constant path folding
 	dead code elimination
 
