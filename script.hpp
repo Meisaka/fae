@@ -97,6 +97,7 @@ module_ptr compile_sourcefile(std::ostream &out, string file_source);
 module_ptr test_parse_sourcefile(std::ostream &dbg, const string_view file_path);
 module_ptr test_compile_sourcefile(std::ostream &dbg, const string_view file_path);
 
+struct FaeVM;
 class ScriptContext {
 public:
 
@@ -106,7 +107,7 @@ public:
 	virtual void FunctionCall(const string_view i);
 	virtual void LoadScriptFile(const string_view f, const string_view i);
 private:
-	std::unordered_map<string, std::shared_ptr<ModuleContext>> script_map;
+	std::shared_ptr<FaeVM> vm;
 };
 }
 
