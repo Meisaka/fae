@@ -5,25 +5,21 @@ Almost second name: Tsun
 TODO items:
 partial/bug:
 	up arguments in closures are borked again.
+	object member variables being accessed from closures
 
-object-like types:
-	function variables as objects or something
-	constants table
-		revisit object blocks
-		object variables need... to exist
-		object block code gen
-	array blocks
-		array variables need... to exist
-	string variables need... to exist
-		length operator
-		string operators: concat
-		add "for"
-		add "in"
-	gc
+constants table
+	revisit object blocks
+array blocks
+	array variables need... to exist
+string operators: concat, length operator
+add "for" add "in"
+gc
 remaining normal operators
 namespaces
-	import
+	import - partially done
 	export
+
+assign operators should "return" references, so they can be chained.
 
 type checking on operators (during compile maybe?)
 variant type
@@ -38,7 +34,9 @@ ranges:
 pattern matching: spec and grammar
 
 optimizations:
+	put all the built-in operators and keywords into the string table
 	const variable (don't need to stack them, probably)
+	closures don't need to capture variables they never use (split closure contexts).
 	eliminate Jump to Jump in IR
 	mutable variable (keep on stack, or skip reload if in register)
 	constant folding (and other similar operations)
@@ -256,7 +254,7 @@ expressions and types:
 			var_decl_expression
 			-- "public" var syntax:
 			| ( key ("=" | "->") expression)
-			| ((key | oper_name) "=>" function_expression
+			| ((key | oper_name) "=>" function_expression)
 			[ "," | ";" | NL ]
 		)... "}"
 	oper_name: operator meta names

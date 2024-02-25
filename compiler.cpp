@@ -172,7 +172,7 @@ std::ostream &operator<<(std::ostream &os, ty tk) { return os << name_of(tk); }
 	f(K_True) f(K_False) \
 	f(K_Import) f(K_Export) \
 	f(K_Type) f(K_Enum) f(O_Sum) f(O_Union) \
-	f(O_Decl) f(O_DeclAssign) f(O_CallExpr) \
+	f(O_Decl) f(O_DeclAssign) f(O_ObjAssign) f(O_CallExpr) \
 	f(O_Minus) f(O_Not) f(O_Length) \
 	f(O_And) f(O_Or) f(O_Xor) \
 	f(O_Add) f(O_Sub) f(O_Mul) f(O_Power) \
@@ -466,6 +466,7 @@ const ParserKeyword keyword_table[] = {
 	{"%"sv ,Token::O_Mod, Expr::RawOper, ASTSlots::SLOT2},
 	{".*"sv ,Token::O_DotP, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjIdent},
 	{".+"sv ,Token::O_Cross, Expr::RawOper, ASTSlots::SLOT2, KWA::ObjIdent},
+	{".-"sv ,Token::Invalid, Expr::Start, ASTSlots::SLOT2, KWA::ObjIdent},
 	{">>"sv ,Token::O_Rsh, Expr::RawOper, ASTSlots::SLOT2},
 	{">>>"sv ,Token::O_RAsh, Expr::RawOper, ASTSlots::SLOT2},
 	{"<<"sv ,Token::O_Lsh, Expr::RawOper, ASTSlots::SLOT2},
@@ -507,59 +508,60 @@ struct Precedence {
 	Token token;
 };
 Precedence precedence_table[] = {
-	{0, Token::O_Assign},
-	{1, Token::Comma},
+	{0, Token::O_ObjAssign},
+	{1, Token::O_Assign},
+	{2, Token::Comma},
 
-	{2, Token::O_Less},
-	{2, Token::O_Greater},
-	{2, Token::O_LessEq},
-	{2, Token::O_GreaterEq},
-	{2, Token::O_EqEq},
-	{2, Token::O_NotEq},
+	{3, Token::O_Less},
+	{3, Token::O_Greater},
+	{3, Token::O_LessEq},
+	{3, Token::O_GreaterEq},
+	{3, Token::O_EqEq},
+	{3, Token::O_NotEq},
 
-	{3, Token::O_AndEq},
-	{3, Token::O_OrEq},
-	{3, Token::O_XorEq},
-	{3, Token::O_AddEq},
-	{3, Token::O_SubEq},
-	{3, Token::O_MulEq},
-	{3, Token::O_PowerEq},
-	{3, Token::O_DivEq},
-	{3, Token::O_ModEq},
-	{3, Token::O_CrossEq},
-	{3, Token::O_RshEq},
-	{3, Token::O_RAshEq},
-	{3, Token::O_LshEq},
+	{4, Token::O_AndEq},
+	{4, Token::O_OrEq},
+	{4, Token::O_XorEq},
+	{4, Token::O_AddEq},
+	{4, Token::O_SubEq},
+	{4, Token::O_MulEq},
+	{4, Token::O_PowerEq},
+	{4, Token::O_DivEq},
+	{4, Token::O_ModEq},
+	{4, Token::O_CrossEq},
+	{4, Token::O_RshEq},
+	{4, Token::O_RAshEq},
+	{4, Token::O_LshEq},
 
-	{4, Token::O_Or},
-	{5, Token::O_And},
-	{6, Token::O_Xor},
-	{7, Token::O_Add},
-	{7, Token::O_Sub},
+	{5, Token::O_Or},
+	{6, Token::O_And},
+	{7, Token::O_Xor},
+	{8, Token::O_Add},
+	{8, Token::O_Sub},
 
-	{8, Token::O_Rsh},
-	{8, Token::O_RAsh},
-	{9, Token::O_Lsh},
+	{9, Token::O_Rsh},
+	{9, Token::O_RAsh},
+	{10, Token::O_Lsh},
 
-	{10, Token::O_Mul},
+	{11, Token::O_Mul},
 
-	{11, Token::O_Div},
-	{11, Token::O_Mod},
-	{11, Token::O_DivMod},
+	{12, Token::O_Div},
+	{12, Token::O_Mod},
+	{12, Token::O_DivMod},
 
-	{12, Token::O_Power},
-	{12, Token::O_DotP},
-	{12, Token::O_Cross},
+	{13, Token::O_Power},
+	{13, Token::O_DotP},
+	{13, Token::O_Cross},
 
-	{13, Token::O_Range},
+	{14, Token::O_Range},
 
-	{14, Token::O_Minus},
-	{14, Token::O_Not},
-	{14, Token::O_Length},
+	{15, Token::O_Minus},
+	{15, Token::O_Not},
+	{15, Token::O_Length},
 
-	{15, Token::O_CallExpr},
-	{16, Token::O_Dot},
-	{17, Token::O_Decl},
+	{16, Token::O_CallExpr},
+	{17, Token::O_Dot},
+	{18, Token::O_Decl},
 };
 constexpr auto precedence_table_span = std::span{precedence_table};
 static constexpr uint8_t get_precedence(Token token) {
@@ -1093,6 +1095,7 @@ Token::t, Expr::cl, ASTSlots::num, LexTokenRange{s->block.tk_begin, s->block.tk_
 
 #define DEF_OPCODES(f) \
 	f(LoadUnit) f(LoadConst) f(LoadBool) f(LoadString) f(LoadClosure) \
+	f(LoadNewObject) \
 	f(LoadVariable) f(StoreVariable) f(LoadArg) f(StoreArg) \
 	f(LoadLocal) f(StoreLocal) f(LoadStack) f(StoreStack) \
 	f(NamedArgLookup) f(NamedLookup) f(AssignNamed) \
@@ -1509,14 +1512,31 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 	_DW(walk.dbg) << "Expr:" << expr->ast_token << " ";
 	switch(expr->asc) {
 	case Expr::BlockExpr: {
-		if(IS_TOKEN(expr, Object) || IS_TOKEN(expr, Array)) {
-			_DW(walk.err) << "unhandled block type: " << expr->ast_token << '\n';
+		if(IS_TOKEN(expr, Array)) {
+			_DW(walk.err) << "unhandled array block: " << expr->ast_token << '\n';
 			return false;
+		}
+		if(IS_TOKEN(expr, Object)) {
+			ins(Instruction{Opcode::LoadNewObject});
+			ins(Instruction{Opcode::PushRegister});
+			begin_scope();
+			_DW(walk.err) << "object block: " << expr->ast_token << '\n';
+			for(auto &walk_node : expr->list) {
+				if(IS_TOKEN(walk_node, O_Assign) || IS_TOKEN(walk_node, O_ObjAssign)) {
+					// get identifer from slot1, store the value at it as a key.
+					size_t name_index = 
+						walk.module_ctx.find_or_put_string(walk_node->slot1->block.as_string());
+					if(!walk_expression(walk, ctx, walk_node->slot2)) return false;
+					ins(Instruction{Opcode::AssignNamed, name_index});
+				} else if(!walk_expression(walk, ctx, walk_node)) return false;
+			}
+			end_scope();
+			ins(Instruction{Opcode::PopRegister});
+			break;
 		}
 		begin_scope();
 		for(auto &walk_node : expr->list) {
-			if(!walk_expression(walk, ctx, walk_node))
-				return false;
+			if(!walk_expression(walk, ctx, walk_node)) return false;
 		}
 		end_scope();
 		//for(auto &ins : block_context->instructions) _DW(dbg) << ins << '\n';
@@ -3021,9 +3041,10 @@ bool parse_source(std::ostream &dbg, std::shared_ptr<ModuleContext> root_module)
 					Token::Ident, Expr::Start, found->slots, lex_range));
 			} else {
 				if(found->action == KWA::ObjAssign
+					&& lex_range.token == Token::Arrow
 					&& IS_TOKEN(current_block->block, Object)) {
 					if(current_block->obj_ident) {
-						lex_range.token = Token::O_Assign;
+						lex_range.token = Token::O_ObjAssign;
 					}
 					current_block->obj_ident = false;
 				}
@@ -3397,6 +3418,7 @@ struct FaeVM {
 			for(auto &ins : frame->instructions) {
 				switch(ins.opcode) {
 					case Opcode::NamedLookup:
+					case Opcode::AssignNamed:
 					case Opcode::LoadString:
 					ins.param = str_conversions.at(ins.param);
 					break;
@@ -3433,7 +3455,7 @@ FaeVM::FaeVM() {
 		sys_obj->values.emplace(
 			find_or_add_string("randomInt"sv),
 			put_variable(new VMNativeFunction([](FaeTask &task) {
-				task.accumulator = Register{task.vm, 4ull};
+				task.accumulator = Register{task.vm, uint64_t{4ull}};
 			})));
 	}
 	{
@@ -3443,7 +3465,7 @@ FaeVM::FaeVM() {
 		io_obj->values.emplace(
 			find_or_add_string("input"sv),
 			put_variable(new VMNativeFunction([](FaeTask &task) {
-				task.accumulator = Register{task.vm, 4ull};
+				task.accumulator = Register{task.vm, uint64_t{4ull}};
 			})));
 		io_obj->values.emplace(
 			find_or_add_string("print"sv),
@@ -3685,6 +3707,36 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 			vm->var_table.emplace_back(new VMFunction{task->current_frame->scope, param});
 			task->accumulator = Register{*vm, current_var, VarType::Function};
 			task->show_accum(dbg);
+			break;
+		}
+		case Opcode::LoadNewObject: {
+			dbg << "new object\n";
+			task->accumulator = vm->put_variable(new VMObject{});
+			task->show_accum(dbg);
+			break;
+		}
+		case Opcode::AssignNamed: {
+			if(task->value_stack.empty()) {
+				dbg << "AssignNamed: value stack empty!\n";
+				return;
+			}
+			Register &obj = task->value_stack.back();
+			if(obj.vtype != VarType::Object
+				|| obj.value > vm->var_table.size()
+				|| vm->var_table[obj.value]->get_type() != VarType::Object
+				) {
+				dbg << "AssignNamed: \"" << vm->str_table[param] << "\" on bad object: " << obj << "\n";
+				return;
+			}
+			auto obj_pointer = static_cast<VMObject*>(vm->var_table[obj.value].get());
+			auto value_itr = obj_pointer->values.find(param);
+			dbg << "AssignNamed \"" << vm->str_table[param] << "\"\n";
+			if(value_itr == obj_pointer->values.end()) {
+				obj_pointer->values.emplace(param, std::move(task->accumulator));
+			} else {
+				value_itr->second = std::move(task->accumulator);
+			}
+			task->show_vars(dbg);
 			break;
 		}
 		case Opcode::NamedLookup: {
