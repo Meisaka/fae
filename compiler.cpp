@@ -45,7 +45,8 @@ const auto invalid_name_string = "?"sv;
 
 #define DEF_VARIABLE_TYPES(f) \
 	f(Unset, false) f(Unit, false) f(Integer, false) f(Bool, false) \
-	f(Function, true) f(Object, true) f(NativeFunction, true) f(String, true)
+	f(NativeFunction, true) f(Function, true) f(String, true) \
+	f(Array, true) f(Object, true)
 enum class VarType {
 #define GENERATE(f, b) f,
 	DEF_VARIABLE_TYPES(GENERATE)
@@ -1095,7 +1096,7 @@ Token::t, Expr::cl, ASTSlots::num, LexTokenRange{s->block.tk_begin, s->block.tk_
 
 #define DEF_OPCODES(f) \
 	f(LoadUnit) f(LoadConst) f(LoadBool) f(LoadString) f(LoadClosure) \
-	f(LoadNewObject) \
+	f(LoadNewObject) f(LoadNewArray) \
 	f(LoadVariable) f(StoreVariable) f(LoadArg) f(StoreArg) \
 	f(LoadLocal) f(StoreLocal) f(LoadStack) f(StoreStack) \
 	f(NamedArgLookup) f(NamedLookup) f(AssignNamed) \
@@ -1513,8 +1514,29 @@ bool walk_expression(WalkContext &walk, std::shared_ptr<FrameContext> &ctx, cons
 	switch(expr->asc) {
 	case Expr::BlockExpr: {
 		if(IS_TOKEN(expr, Array)) {
-			_DW(walk.err) << "unhandled array block: " << expr->ast_token << '\n';
-			return false;
+			begin_scope();
+			size_t stack_size = 0;
+			_DW(walk.err) << "array block: " << expr->ast_token << '\n';
+			if(expr->list.size() == 1) {
+				auto &item = expr->list.front();
+				if(IS_TOKEN(item, Comma)) {
+					for(auto &walk_node : item->list) {
+						if(!walk_expression(walk, ctx, walk_node)) return false;
+						ins(Instruction{Opcode::PushRegister});
+						stack_size++;
+					}
+				} else {
+					if(!walk_expression(walk, ctx, item)) return false;
+					ins(Instruction{Opcode::PushRegister});
+					stack_size++;
+				}
+			} else {
+				walk.show_syn_error("array block"sv, expr);
+				return false;
+			}
+			end_scope();
+			ins(Instruction{Opcode::LoadNewArray, stack_size});
+			break;
 		}
 		if(IS_TOKEN(expr, Object)) {
 			ins(Instruction{Opcode::LoadNewObject});
@@ -3291,6 +3313,11 @@ struct VMFunction : VMVar {
 		: up{_up}, scope_id{_id} {}
 	VarType get_type() const { return VarType::Function; }
 };
+struct VMArray : VMVar {
+	std::vector<Register> values;
+	VMArray() {}
+	VarType get_type() const { return VarType::Array; }
+};
 struct VMObject : VMVar {
 	std::unordered_map<size_t, Register> values;
 	VMObject() {}
@@ -3320,6 +3347,10 @@ struct FaeTask {
 	FaeVM &vm;
 	FaeTask(FaeVM &vm);
 	void enter_frame(std::shared_ptr<FrameContext> context, std::shared_ptr<UpScope> up);
+	size_t var_stack_size() const {
+		size_t var_end = current_frame->first_var_pos + current_frame->context->var_declarations.size();
+		return value_stack.size() - var_end;
+	}
 	void show_accum(std::ostream &out) const {
 		out << "A: " << accumulator << '\n';
 	}
@@ -3513,30 +3544,69 @@ Register& Register::operator=(Register &&v) {
 std::ostream &operator<<(std::ostream &os, const Register &v) {
 	size_t vtype = static_cast<size_t>(v.vtype);
 	if(vtype >= variable_type_size) vtype = 0;
-	os << "{";
+	bool is_open = false;
+	auto open_bracket = [&]() {
+		if(!is_open) {
+			is_open = true;
+			os << "{";
+		}
+	};
+	auto show_ref_counts = [&]() {
+		auto &ptr = v.vm.var_table[v.value];
+		os << ptr.ref_count << ',' << ptr.weak_count << ',';
+	};
 	if(is_vtype_pointer(v.vtype)) {
 		auto &ptr = v.vm.var_table[v.value];
 		if(ptr->get_type() != v.vtype) {
+			open_bracket();
 			os << variable_type_names[vtype] << "!=" << variable_type_names[static_cast<size_t>(ptr->get_type())];
 			return os << "}";
 		}
-		os << ptr.ref_count << ',' << ptr.weak_count << ',';
 	}
 	switch(v.vtype) {
 	case VarType::Bool:
 		os << (v.value == 0 ? "False" : "True");
 		break;
 	case VarType::Integer:
-		os << static_cast<int64_t>(v.value);
+		os << '#' << static_cast<int64_t>(v.value);
 		break;
 	case VarType::Function: {
+		open_bracket();
 		auto f_ptr = static_cast<VMFunction*>(v.vm.var_table[v.value].get());
 		os << "Fn:" << f_ptr->scope_id;
 		break;
 	}
+	case VarType::Array: {
+		auto o_ptr = static_cast<VMArray*>(v.vm.var_table[v.value].get());
+		size_t array_size = o_ptr->values.size();
+		if(array_size == 0) {
+			os << "[]";
+		} else if(array_size > 0 && array_size <= 8) {
+			os << '[' << o_ptr->values.front();
+			if(array_size > 0) {
+				std::ranges::for_each(o_ptr->values.cbegin() + 1, o_ptr->values.cend(), [&](auto &array_value) {
+					os << ", " << array_value;
+				});
+			}
+			os << ']';
+		} else {
+			os << "Arr:" << array_size;
+		}
+		break;
+	}
 	case VarType::Object: {
+		open_bracket();
 		auto o_ptr = static_cast<VMObject*>(v.vm.var_table[v.value].get());
-		os << "Obj:" << o_ptr->values.size();
+		size_t object_size = o_ptr->values.size();
+		if(object_size > 0 && object_size <= 8) {
+			auto itr = o_ptr->values.cbegin();
+			os << v.vm.str_table[itr->first] << " -> " << itr->second;
+			for(;itr != o_ptr->values.cend(); itr++) {
+				os << ", " << v.vm.str_table[itr->first] << " -> " << itr->second;
+			}
+		} else {
+			os << "Obj:" << object_size;
+		}
 		break;
 	}
 	case VarType::String: {
@@ -3545,6 +3615,7 @@ std::ostream &operator<<(std::ostream &os, const Register &v) {
 		break;
 	}
 	case VarType::NativeFunction: {
+		open_bracket();
 		auto f_ptr = static_cast<VMNativeFunction*>(v.vm.var_table[v.value].get());
 		os << "NFN:" << *(void**)&f_ptr->native;
 		break;
@@ -3554,7 +3625,7 @@ std::ostream &operator<<(std::ostream &os, const Register &v) {
 		os << variable_type_names[vtype];
 		break;
 	}
-	os << "}";
+	if(is_open) os << "}";
 	return os;
 }
 
@@ -3706,6 +3777,27 @@ void ScriptContext::FunctionCall(const string_view func_name) {
 			size_t current_var = vm->var_table.size();
 			vm->var_table.emplace_back(new VMFunction{task->current_frame->scope, param});
 			task->accumulator = Register{*vm, current_var, VarType::Function};
+			task->show_accum(dbg);
+			break;
+		}
+		case Opcode::LoadNewArray: {
+			dbg << "new array\n";
+			VMArray *array_var = new VMArray{};
+			if(param > 0) {
+				array_var->values.reserve(param);
+				if(param > task->var_stack_size()) {
+					dbg << "NewArray: stack underflow!\n";
+					return;
+				}
+				auto stack_end = task->value_stack.end();
+				auto stack_first = stack_end - param;
+				auto stack_itr = stack_first;
+				for(;stack_itr != stack_end; stack_itr++) {
+					array_var->values.emplace_back(std::move(*stack_itr));
+				}
+				task->value_stack.erase(stack_first, stack_end);
+			}
+			task->accumulator = vm->put_variable(array_var);
 			task->show_accum(dbg);
 			break;
 		}

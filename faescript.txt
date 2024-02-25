@@ -7,10 +7,13 @@ partial/bug:
 	up arguments in closures are borked again.
 	object member variables being accessed from closures
 
+array access:
+	reading items
+	appending items
+	removing items
+	length
 constants table
 	revisit object blocks
-array blocks
-	array variables need... to exist
 string operators: concat, length operator
 add "for" add "in"
 gc
